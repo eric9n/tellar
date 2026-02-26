@@ -15,15 +15,10 @@ show_usage() {
 
 case "$1" in
     setup)
-        GUILD_PATH="$2"
-        if [ -z "$GUILD_PATH" ]; then
-            echo "❌ Error: Please specify the absolute path to your guild directory."
-            echo "Usage: $0 setup /path/to/your/guild"
-            exit 1
-        fi
-
-        # Convert to absolute path if it is relative
-        ABS_GUILD_PATH=$(realpath "$GUILD_PATH")
+        GUILD_PATH="${2:-$HOME/.tellar}"
+        
+        # Convert to absolute path
+        ABS_GUILD_PATH=$(realpath -m "$GUILD_PATH")
 
         echo "🕯️ Setting up Tellar service with guild: $ABS_GUILD_PATH"
         mkdir -p "$SYSTEMD_USER_DIR"
