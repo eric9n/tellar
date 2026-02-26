@@ -73,7 +73,9 @@ async fn run_setup(guild_path: &Path) -> Result<()> {
 
     // 2. Interactive Configuration
     let config_file = guild_path.join("tellar.yml");
-    let mut config = Config::load(&config_file)?;
+    let mut config = Config::load(&config_file).unwrap_or_else(|_| {
+         serde_yaml::from_str("gemini:\n  api_key: \"YOUR_KEY\"\n  model: \"\"\ndiscord:\n  token: \"YOUR_TOKEN\"").unwrap()
+    });
 
     // Gemini Keys
     if config.gemini.api_key.contains("YOUR_") || config.gemini.api_key.is_empty() {
@@ -150,7 +152,7 @@ async fn run_setup(guild_path: &Path) -> Result<()> {
         println!("Note: Auto-start service is not yet implemented for macOS (Launchd).");
     }
 
-    println!("\n� Setup complete! Your Steward is ready.");
+    println!("\n🚀 Setup complete! Your Steward is ready.");
     Ok(())
 }
 
