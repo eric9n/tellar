@@ -1,0 +1,10 @@
+gemini:
+  api_key: "YOUR_GEMINI_API_KEY"
+  model: "gemini-3-flash-preview"
+
+discord:
+  token: "YOUR_DISCORD_BOT_TOKEN"
+
+guardian:
+  # model: "gemini-2.0-flash" # Optional: Different model for the Guardian
+

@@ -1,0 +1,48 @@
+[package]
+name = "tellar"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = true
+opt-level = "s"          # Optimize for size
+debug-assertions = false
+codegen-units = 1        # Better global optimization
+strip = true             # Remove debug symbols
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.38", features = ["full"] }
+# Network requests (LLM API & Webhook)
+reqwest = { version = "0.12", features = ["json", "default-tls"] }
+
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+# Time handling
+chrono = "0.4"
+# Discord Library (Serenity)
+serenity = { version = "0.12", default-features = false, features = [
+  "cache",
+  "native_tls_backend",
+  "client",
+  "gateway",
+  "model",
+] }
+
+futures-util = "0.3"
+# Folder monitoring / CRON tasks
+notify = "6.1"
+tokio-cron-scheduler = "0.10.0"
+# Utilities
+regex = "1.10"
+anyhow = "1.0"
+uuid = { version = "1.10", features = ["v4"] }
+once_cell = "1.19"
+base64 = "0.22"
+# Configuration discovery
+clap = { version = "4.5.60", features = ["derive"] }
+dirs = "6.0.0"
+include_dir = "0.7"
