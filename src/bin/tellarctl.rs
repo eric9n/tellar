@@ -7,8 +7,11 @@
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::process::Command;
-use std::path::PathBuf;
+use anyhow::{Context, Result};
 use dirs::home_dir;
+use tellar::config::Config;
+use tellar::init;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "tellarctl")]
@@ -16,16 +19,16 @@ use dirs::home_dir;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// 盟友会馆 (Guild) 目录 (默认: ~/.tellar)
+    #[arg(short, long, global = true)]
+    guild: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Setup the systemd user service
-    Setup {
-        /// Path to the guild directory (defaults to ~/.tellar/guild)
-        #[arg(short, long)]
-        guild: Option<String>,
-    },
+    /// Full interactive setup (Keys + Service)
+    Setup,
     /// Start the Tellar service
     Start,
     /// Stop the Tellar service
@@ -38,36 +41,47 @@ enum Commands {
     Logs,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let service_name = "tellar";
+    
+    let guild_path = init::resolve_guild_path(cli.guild);
     let home = home_dir().expect("Could not locate home directory");
     let systemd_user_dir = home.join(".config").join("systemd").join("user");
     let target_service_path = systemd_user_dir.join(format!("{}.service", service_name));
 
     match cli.command {
-        Commands::Setup { guild } => {
-            let guild_path = guild.unwrap_or_else(|| {
-                home.join(".tellar").join("guild").to_string_lossy().to_string()
-            });
+        Commands::Setup => {
+            println!("🕯️  Starting comprehensive setup for Tellar...");
             
-            // Get absolute path
-            let abs_guild_path = fs::canonicalize(&guild_path)
-                .unwrap_or_else(|_| PathBuf::from(&guild_path));
-            let abs_path_str = abs_guild_path.to_string_lossy();
+            // 1. Ensure foundations exist
+            init::initialize_guild(&guild_path)?;
+            init::persist_guild_path(&guild_path)?;
 
-            println!("🕯️ Setting up Tellar service with guild: {}", abs_path_str);
+            // 2. Load/Create configuration
+            let config_file = guild_path.join("tellar.yml");
+            let mut config = Config::load(&config_file).unwrap_or_else(|_| {
+                // Return a default config if not found
+                serde_yaml::from_str("gemini:\n  api_key: \"YOUR_KEY\"\n  model: \"\"\ndiscord:\n  token: \"YOUR_TOKEN\"").unwrap()
+            });
 
+            // 3. Run interactive Key/Model/Systemd path setup
+            init::run_interactive_setup(&guild_path, &mut config).await?;
+
+            // 4. Finalize Systemd Service Installation
+            println!("\n� Finalizing systemd service installation...");
             if !systemd_user_dir.exists() {
-                fs::create_dir_all(&systemd_user_dir).expect("Failed to create systemd user directory");
+                fs::create_dir_all(&systemd_user_dir).context("Failed to create systemd user directory")?;
             }
 
-            // Embed the template
-            let template = include_str!("../../scripts/tellar.service");
-            let service_content = template.replace("{{GUILD_PATH}}", &abs_path_str);
-
-            fs::write(&target_service_path, service_content).expect("Failed to write service file");
-            println!("✅ Service file created at {:?}", target_service_path);
+            // The setup logic in init.rs already updated scripts/tellar.service
+            // We just need to copy it to the systemd directory
+            let service_template = guild_path.join("scripts").join("tellar.service");
+            if service_template.exists() {
+                fs::copy(&service_template, &target_service_path).context("Failed to copy service file")?;
+                println!("✅ Service file installed at {:?}", target_service_path);
+            }
 
             // Reload systemd
             run_cmd("systemctl", &["--user", "daemon-reload"]);
@@ -78,7 +92,8 @@ fn main() {
             println!("🔧 Enabling linger for {}...", user);
             run_cmd("loginctl", &["enable-linger", &user]);
 
-            println!("🚀 Setup complete. Run 'tellarctl start' to begin stewardship.");
+            println!("\n🚀 Setup complete! Your Steward is ready.");
+            println!("Run 'tellarctl start' to begin.");
         }
         Commands::Start => {
             println!("🕯️ Starting Tellar...");
@@ -99,6 +114,7 @@ fn main() {
             run_cmd("journalctl", &["--user", "-u", service_name, "-f"]);
         }
     }
+    Ok(())
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) {

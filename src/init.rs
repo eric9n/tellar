@@ -64,6 +64,115 @@ pub fn persist_guild_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn mask_secret(secret: &str) -> String {
+    if secret.len() <= 5 {
+        "***".to_string()
+    } else {
+        format!("***{}", &secret[secret.len() - 5..])
+    }
+}
+
+/// Run interactive setup for keys and systemd
+pub async fn run_interactive_setup(base_path: &Path, config: &mut crate::config::Config) -> Result<()> {
+    use std::io::Write;
+    
+    println!("\n✨ Tellar Setup - Initializing your Cyber Steward...");
+
+    // 1. Gemini API Key
+    let env_key = std::env::var("GEMINI_API_KEY").ok();
+    if let Some(key) = &env_key {
+        println!("\n🔑 Gemini API Key detected in environment: {}", mask_secret(key));
+        println!("Press Enter to use it, or paste a new one:");
+    } else {
+        println!("\n🔑 Please enter your Gemini API Key:");
+    }
+    
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    
+    if !trimmed.is_empty() {
+        config.gemini.api_key = trimmed.to_string();
+    } else if let Some(key) = env_key {
+        config.gemini.api_key = key;
+    } else if config.gemini.api_key.contains("YOUR_") {
+        anyhow::bail!("API Key cannot be empty.");
+    }
+
+    // 2. Discord Bot Token
+    let env_token = std::env::var("DISCORD_BOT_TOKEN").ok();
+    if let Some(token) = &env_token {
+        println!("\n🤖 Discord Bot Token detected in environment: {}", mask_secret(token));
+        println!("Press Enter to use it, or paste a new one:");
+    } else {
+        println!("\n🤖 Please enter your Discord Bot Token:");
+    }
+
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    
+    if !trimmed.is_empty() {
+        config.discord.token = trimmed.to_string();
+    } else if let Some(token) = env_token {
+        config.discord.token = token;
+    } else if config.discord.token.contains("YOUR_") {
+        anyhow::bail!("Discord Token cannot be empty.");
+    }
+
+    // 3. Gemini Model Selection
+    println!("\n🔍 Fetching available models...");
+    match crate::llm::list_models(&config.gemini.api_key).await {
+        Ok(models) => {
+            if !models.is_empty() {
+                println!("\n🤖 Select a Cyber Brain for your Steward:");
+                for (i, m) in models.iter().enumerate() {
+                    println!("  [{}] {}", i + 1, m);
+                }
+                print!("Choice (1-{}, default 1): ", models.len());
+                std::io::stdout().flush()?;
+                
+                let mut choice = String::new();
+                std::io::stdin().read_line(&mut choice)?;
+                let idx = choice.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
+                config.gemini.model = models.get(idx).unwrap_or(&models[0]).clone();
+                println!("✅ Brain selected: {}", config.gemini.model);
+            }
+        },
+        Err(e) => eprintln!("⚠️ Failed to fetch models: {}. Using default.", e),
+    }
+
+    // 4. Systemd Path Replacement (Optional)
+    println!("\n⚙️  Do you want to update the systemd service file with current paths? (y/N)");
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut choice = String::new();
+    std::io::stdin().read_line(&mut choice)?;
+    if choice.trim().to_lowercase() == "y" {
+        let service_template = base_path.join("scripts").join("tellar.service");
+        if service_template.exists() {
+            let content = fs::read_to_string(&service_template)?;
+            let updated = content.replace("{{GUILD_PATH}}", &base_path.to_string_lossy());
+            fs::write(&service_template, updated)?;
+            println!("✅ Updated scripts/tellar.service with path: {}", base_path.display());
+        } else {
+            println!("⚠️ scripts/tellar.service not found. Skipping.");
+        }
+    }
+
+    // 5. Persist updated config
+    let config_file = base_path.join("tellar.yml");
+    let updated_yaml = serde_yaml::to_string(&config)?;
+    fs::write(&config_file, updated_yaml)?;
+    println!("\n📝 Configuration inscribed to tellar.yml!");
+
+    Ok(())
+}
+
 /// Initialize guild structure
 pub fn initialize_guild(base_path: &Path) -> Result<()> {
     // 1. Extract all embedded assets (this creates the directory structure)

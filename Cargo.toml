@@ -45,4 +45,5 @@ base64 = "0.22"
 # Configuration discovery
 clap = { version = "4.5.60", features = ["derive"] }
 dirs = "6.0.0"
+atty = "0.2"
 include_dir = "0.7"
