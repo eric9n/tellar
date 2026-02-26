@@ -83,9 +83,9 @@ To execute complex tasks, create a **Ritual** in the `rituals/` directory. Ritua
 
 To run Tellar as a persistent service on Ubuntu using `systemd --user`:
 
-1. **Move Binary**: Place the compiled `tellar` binary in `/usr/local/bin/`.
+1. **Install Binary**: Run `cargo install --path .` to install Tellar to `~/.cargo/bin/tellar`.
 2. **Setup Unit**: Create `~/.config/systemd/user/tellar.service` with the content from `scripts/tellar.service`.
-3. **Configure Paths**: Edit the service file to point `WorkingDirectory` and `ExecStart` to your actual guild and binary paths.
+3. **Configure Paths**: Edit the service file to point `WorkingDirectory` and `ExecStart` to your actual guild and binary paths (usually `ExecStart=%h/.cargo/bin/tellar`).
 4. **Control Commands**:
    ```bash
    systemctl --user daemon-reload

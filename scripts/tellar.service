@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 # Ensure you replace /path/to/your/guild with the absolute path to your guild directory
-WorkingDirectory=/root/tellar-guild
-ExecStart=/usr/local/bin/tellar --guild /root/tellar-guild
+WorkingDirectory=%h/tellar-guild
+ExecStart=%h/.cargo/bin/tellar --guild %h/tellar-guild
 Restart=always
 RestartSec=10
 # Standard output/error logging
