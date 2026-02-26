@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             });
 
             // 3. Run interactive Key/Model/Systemd path setup
-            let final_guild_path = init::run_interactive_setup(&guild_path, &mut config).await?;
+            let _final_guild_path = init::run_interactive_setup(&guild_path, &mut config).await?;
 
             // 4. Finalize Systemd Service Installation
             println!("\n🔧 Finalizing systemd service installation...");
