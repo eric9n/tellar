@@ -7,7 +7,7 @@
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::process::Command;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use dirs::home_dir;
 use tellar::config::Config;
 use tellar::init;

@@ -1,5 +1,8 @@
 use tellar::discord;
 use tellar::init;
+use tellar::rhythm;
+use tellar::guardian;
+use tellar::watch;
 
 use tellar::config::Config;
 use tellar::StewardNotification;
@@ -147,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     let _tx_keepalive = notif_tx.clone();
 
     // Watchman is the main synchronous orchestrator now
-    if let Err(e) = tellar::watch::start_watchman(&base_path_watch, &config_watch, notif_rx, shared_mappings.clone()).await {
+    if let Err(e) = watch::start_watchman(&base_path_watch, &config_watch, notif_rx, shared_mappings.clone()).await {
         eprintln!("⚠️ The Watchman has fallen: {:?}", e);
     }
 
