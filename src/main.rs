@@ -1,5 +1,4 @@
 use tellar::discord;
-use tellar::init;
 use tellar::rhythm;
 use tellar::guardian;
 use tellar::watch;
@@ -34,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     "#);
 
     let args = Cli::parse();
-    let guild_path = init::resolve_guild_path(args.guild);
+    let guild_path = args.guild.unwrap_or_else(tellar::default_guild_path);
     
     // 1. Strict check: Guild must exist (no auto-init)
     if !guild_path.exists() {
@@ -65,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         println!("🔍 Discovering channels for Guild: {}...", guild_id);
         match discord::fetch_guild_channels(&config.discord.token, guild_id).await {
             Ok(channels) => {
-                init::mirror_guild_structure(&guild_path, &channels)?; // Corrected call to init::mirror_guild_structure
+                tellar::mirror_guild_structure(&guild_path, &channels)?;
                 let mut map = shared_mappings.write().await;
                 for (id, name) in channels {
                     map.insert(id, name.clone());

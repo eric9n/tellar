@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use dirs::home_dir;
 use include_dir::{include_dir, Dir};
 use tellar::config::Config;
-use tellar::init;
 
 static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets");
 
@@ -42,7 +41,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let guild_path = init::resolve_guild_path(cli.guild);
+    let guild_path = cli.guild.unwrap_or_else(tellar::default_guild_path);
     
     match cli.command {
         Commands::Setup => run_setup(&guild_path).await?,
