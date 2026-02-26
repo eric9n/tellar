@@ -1,0 +1,17 @@
+[Unit]
+Description=Tellar Cyber Steward
+After=network.target
+
+[Service]
+Type=simple
+# Ensure you replace /path/to/your/guild with the absolute path to your guild directory
+WorkingDirectory=/root/tellar-guild
+ExecStart=/usr/local/bin/tellar --guild /root/tellar-guild
+Restart=always
+RestartSec=10
+# Standard output/error logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

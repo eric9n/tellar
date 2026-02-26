@@ -79,6 +79,27 @@ To execute complex tasks, create a **Ritual** in the `rituals/` directory. Ritua
 
 ---
 
+## 🖥️ Service Management (Ubuntu / systemd)
+
+To run Tellar as a persistent service on Ubuntu using `systemd --user`:
+
+1. **Move Binary**: Place the compiled `tellar` binary in `/usr/local/bin/`.
+2. **Setup Unit**: Create `~/.config/systemd/user/tellar.service` with the content from `scripts/tellar.service`.
+3. **Configure Paths**: Edit the service file to point `WorkingDirectory` and `ExecStart` to your actual guild and binary paths.
+4. **Control Commands**:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable tellar
+   systemctl --user start tellar
+   systemctl --user status tellar
+   ```
+5. **Persistence**: Enable "lingering" so the service starts on boot and runs without an active session:
+   ```bash
+   loginctl enable-linger $USER
+   ```
+
+---
+
 ## ⚖️ License
 Distributed under the MIT License. See `LICENSE` for more information.
 
