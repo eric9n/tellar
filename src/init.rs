@@ -180,7 +180,10 @@ pub async fn run_interactive_setup(initial_base_path: &Path, config: &mut crate:
         let abs_base_path = fs::canonicalize(&base_path).unwrap_or_else(|_| base_path.to_path_buf());
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tellar"));
         
-        let service_template = abs_base_path.join("scripts").join("tellar.service");
+        // Find scripts at project root (relative to current working directory where setup is run)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let service_template = cwd.join("scripts").join("tellar.service");
+        
         if service_template.exists() {
             let content = fs::read_to_string(&service_template)?;
             let updated = content
@@ -192,6 +195,7 @@ pub async fn run_interactive_setup(initial_base_path: &Path, config: &mut crate:
             println!("   - Binary: {}", binary_path.display());
         } else {
             println!("⚠️ scripts/tellar.service template not found at {:?}", service_template);
+            println!("   Looking for 'scripts' directory in current path: {:?}", cwd);
         }
     }
 

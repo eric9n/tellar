@@ -76,11 +76,14 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // The setup logic in init.rs already updated scripts/tellar.service
-            // We just need to copy it to the systemd directory
-            let service_template = final_guild_path.join("scripts").join("tellar.service");
+            // We just need to copy it from the project's scripts directory
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let service_template = cwd.join("scripts").join("tellar.service");
             if service_template.exists() {
                 fs::copy(&service_template, &target_service_path).context("Failed to copy service file")?;
-                println!("✅ Service file installed at {:?}", target_service_path);
+                println!("✅ Service file installed from project root to {:?}", target_service_path);
+            } else {
+                println!("⚠️ Could not find service file to install at {:?}", service_template);
             }
 
             // Reload systemd
