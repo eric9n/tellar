@@ -81,22 +81,21 @@ To execute complex tasks, create a **Ritual** in the `rituals/` directory. Ritua
 
 ## 🖥️ Service Management (Ubuntu / systemd)
 
-To run Tellar as a persistent service on Ubuntu, use the provided management script:
+To run Tellar as a persistent service on Ubuntu, use the provided `tellarctl` CLI:
 
-1. **Install Binary**: Run `cargo install --path .` to install Tellar to `~/.cargo/bin/tellar`.
-2. **Setup Service**: Run the management script with the **absolute path** to your guild (defaults to `~/.tellar/guild` if omitted):
+1. **Install Tellar**: Run `cargo install --path .` (this installs both `tellar` and `tellarctl` to `~/.cargo/bin/`).
+2. **Setup Service**: Run the management command with the **absolute path** to your guild (defaults to `~/.tellar/guild` if omitted):
    ```bash
-   chmod +x scripts/manage.sh
-   ./scripts/manage.sh setup                # Defaults to ~/.tellar/guild
+   tellarctl setup                # Defaults to ~/.tellar/guild
    # OR
-   ./scripts/manage.sh setup /path/to/guild # Custom path
+   tellarctl setup --guild /path/to/custom/guild
    ```
 3. **Control Commands**:
-   - **Start**: `./scripts/manage.sh start`
-   - **Stop**: `./scripts/manage.sh stop`
-   - **Restart**: `./scripts/manage.sh restart`
-   - **Status**: `./scripts/manage.sh status`
-   - **Logs**: `./scripts/manage.sh logs` (Follow real-time output)
+   - **Start**: `tellarctl start`
+   - **Stop**: `tellarctl stop`
+   - **Restart**: `tellarctl restart`
+   - **Status**: `tellarctl status`
+   - **Logs**: `tellarctl logs` (Follow real-time output)
 
 ---
 
