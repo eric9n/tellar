@@ -85,11 +85,23 @@ pub async fn generate_multimodal(
 
     let res_json: serde_json::Value = response.json().await?;
     
-    let content = res_json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Gemini returned invalid or empty content"))?;
+    // Check for safety filter or other finish reasons
+    let first_candidate = &res_json["candidates"][0];
+    let content = match first_candidate["content"]["parts"][0]["text"].as_str() {
+        Some(text) => text.to_string(),
+        None => {
+            let reason = first_candidate["finishReason"].as_str().unwrap_or("UNKNOWN");
+            let msg = if reason == "SAFETY" {
+                format!("Gemini blocked the response due to SAFETY filters. Check your prompt or history context.")
+            } else {
+                format!("Gemini returned no content. Finish Reason: {}. Response: {}", reason, res_json)
+            };
+            eprintln!("🔴 [LLM ERROR] {}", msg);
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     
-    Ok(content.to_string())
+    Ok(content)
 }
 
 /// Fetch available models from Gemini API
