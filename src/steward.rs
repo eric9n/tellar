@@ -517,7 +517,7 @@ pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
 
 pub(crate) async fn dispatch_tool(name: &str, args: &Value, base_path: &Path, config: &Config) -> String {
     let output = match name {
-        "bash" => {
+        "sh" => {
             let cmd_str = args["command"].as_str().unwrap_or("");
             if cmd_str.is_empty() { "Error: No command provided".into() } else {
                 let res = Command::new("sh")
@@ -532,7 +532,7 @@ pub(crate) async fn dispatch_tool(name: &str, args: &Value, base_path: &Path, co
                         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                         format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr)
                     },
-                    Err(e) => format!("Error executing bash: {}", e),
+                    Err(e) => format!("Error executing sh: {}", e),
                 }
             }
         },
@@ -698,8 +698,8 @@ pub(crate) fn get_tool_definitions(base_path: &Path) -> Value {
             }
         },
         {
-            "name": "bash",
-            "description": "Execute a bash command and return its output.",
+            "name": "sh",
+            "description": "Execute a shell command and return its output.",
             "parameters": {
                 "type": "object",
                 "properties": {
