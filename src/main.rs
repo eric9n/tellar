@@ -49,9 +49,6 @@ async fn main() -> anyhow::Result<()> {
     
     // 1. Initialize foundations (always ensures folders exist)
     init::initialize_guild(&guild_path)?;
-    init::persist_guild_path(&guild_path)?;
-
-    // 2. Load configuration
     let config_file = guild_path.join("tellar.yml");
     let mut config = Config::load(&config_file)?;
 

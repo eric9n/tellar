@@ -6,61 +6,25 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use dirs::home_dir;
 use include_dir::{include_dir, Dir};
 
 static GUILD_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/guild");
 
-const GUILD_POINTER: &str = ".tellar_guild";
-
 /// Resolve guild path
-/// Priority: CLI > Environment Variable > Pointer File > Default (~/.tellar/guild)
+/// Priority: CLI > Default (~/.tellar/guild)
 pub fn resolve_guild_path(cli_guild: Option<PathBuf>) -> PathBuf {
-    // 1. CLI takes highest priority
+    // 1. CLI override
     if let Some(path) = cli_guild {
         return path;
     }
 
-    // 2. Local "guild" folder (if it exists in current dir)
-    if let Ok(cwd) = std::env::current_dir() {
-        let local_guild = cwd.join("guild");
-        if local_guild.is_dir() {
-            return local_guild;
-        }
-    }
-
-    // 3. Environment variable
-    if let Ok(env_path) = std::env::var("TELLAR_GUILD") {
-        return PathBuf::from(env_path);
-    }
-
-    // 4. Pointer file (persistent memory)
-    if let Some(home) = home_dir() {
-        let pointer_path = home.join(GUILD_POINTER);
-        if let Ok(persisted_path) = fs::read_to_string(&pointer_path) {
-            let path = PathBuf::from(persisted_path.trim());
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-
-    // 5. Default path: ~/.tellar/guild
+    // 2. Sole Default path: ~/.tellar/guild
     home_dir()
         .expect("Could not locate home directory")
         .join(".tellar")
         .join("guild")
-}
-
-/// Persist guild path
-pub fn persist_guild_path(path: &Path) -> Result<()> {
-    if let Some(home) = home_dir() {
-        let pointer_path = home.join(GUILD_POINTER);
-        fs::write(pointer_path, path.to_string_lossy().as_ref())
-            .context("Failed to save guild pointer file")?;
-    }
-    Ok(())
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -72,25 +36,11 @@ fn mask_secret(secret: &str) -> String {
 }
 
 /// Run interactive setup for keys and systemd
-pub async fn run_interactive_setup(initial_base_path: &Path, config: &mut crate::config::Config) -> Result<PathBuf> {
+pub async fn run_interactive_setup(base_path: &Path, config: &mut crate::config::Config) -> Result<PathBuf> {
     use std::io::Write;
     
     println!("\n✨ Tellar Setup - Initializing your Cyber Steward...");
-
-    // 0. Guild Path Confirmation
-    println!("\n📂 Current Guild Path: {}", initial_base_path.display());
-    println!("Press Enter to confirm, or enter a new absolute path:");
-    print!("> ");
-    std::io::stdout().flush()?;
-    let mut path_input = String::new();
-    std::io::stdin().read_line(&mut path_input)?;
-    let trimmed_path = path_input.trim();
-    
-    let base_path = if !trimmed_path.is_empty() {
-        PathBuf::from(trimmed_path)
-    } else {
-        initial_base_path.to_path_buf()
-    };
+    println!("📂 Guild Path: {}", base_path.display());
 
     // Ensure directory exists
     if !base_path.exists() {
@@ -99,8 +49,7 @@ pub async fn run_interactive_setup(initial_base_path: &Path, config: &mut crate:
     }
     
     // Core foundations
-    initialize_guild(&base_path)?;
-    persist_guild_path(&base_path)?;
+    initialize_guild(base_path)?;
 
     // 1. Gemini API Key
     let env_key = std::env::var("GEMINI_API_KEY").ok();
@@ -204,7 +153,7 @@ pub async fn run_interactive_setup(initial_base_path: &Path, config: &mut crate:
     let updated_yaml = serde_yaml::to_string(&config)?;
     fs::write(&config_file, updated_yaml)?;
     println!("\n📝 Configuration inscribed to tellar.yml!");
-    Ok(base_path)
+    Ok(base_path.to_path_buf())
 }
 
 /// Initialize guild structure
