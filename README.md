@@ -1,64 +1,86 @@
-# 🕯️ Tellar — The Discord Steward
+# 🕯️ Tellar — The Cyber Steward
 
-<p align="center">
-  <strong>Reactive Blackboard Architecture for Collaborative Stewardship.</strong>
-</p>
+> "In the dance between the digital and the physical, Tellar is the silent partner who keeps the rhythm."
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-  <a href="https://rust-lang.org"><img src="https://img.shields.io/badge/Language-Rust-orange?style=for-the-badge&logo=rust" alt="Rust"></a>
-</p>
+Tellar is a **Minimalist, Document-Driven Cyber Steward** for Discord servers (Guilds). Built with a **Reactive Blackboard Architecture**, Tellar blurs the line between a filesystem and a social space, treating every Discord channel as a living parchment and every thread as a collaborative ritual.
 
-**Tellar** is a minimalist, reactive AI steward designed for Discord servers (Guilds). Unlike traditional bots, Tellar operates on a **Blackboard Architecture** where the Discord channel history and a local filesystem (the "Guild Foundation") are used as a shared workspace for perception and action.
+---
 
-It observes Discord messages, updates its local state (Knowledge, Rituals, Threads), and reacts as an agentic collaborator.
+## 🏛️ Core Philosophy
 
-## 🏛️ Core Concepts
+Tellar is built on the principle of **Intelligent Minimalism**. It doesn't aim to be a multi-functional bot with a thousand commands. Instead, it provides the core cognitive primitives—**Perception, Persistence, and Action**—allowing a guild to grow organic intelligence through documents.
 
-- **Guild (会馆)**: The local root of Tellar's consciousness. It mirrors your Discord Server structure.
-- **Channels**: Discord channels are projected into local markdown files. Knowledge is decentralized: each channel folder maintains its own `KNOWLEDGE.md`.
-- **Brain**: A dedicated `brain/` directory handles system metadata, attachments, and global memory, decoupled from user channels.
-- **Rituals**: Scheduled or reactive task threads. Rituals are isolated task loops that Tellar performs to manage the guild.
-- **Watchman**: A filesystem-reactive engine that awakens the Steward whenever local foundations are touched.
+- **The Blackboard is the State**: No hidden databases. If Tellar knows it, it's written in a file.
+- **Agentic Collaboration**: Tellar doesn't just respond; it observes, maintains, and proposes.
+- **Ritualistic Execution**: Tasks aren't just "jobs"; they are rituals synchronized between Discord and the Guild Foundation.
 
-## 🛠️ The Minimalist Core
-Tellar adheres to the **pi-mono** standard of tool-calling, providing only the essential primitives:
-1. `read`: Perception of foundations.
-2. `write`: Persistence of memories.
-3. `edit`: Precision surgery on state.
-4. `bash`: Direct action on the environment.
+---
 
-Advanced capabilities (`notify`, `draw`, etc.) are implemented as **Pluggable Skills**.
+## 🏗️ Architecture
+
+### 1. The Guild Foundation (会馆)
+The local root of Tellar's consciousness. It mirrors your Discord Server structure, organizing knowledge and state into a predictable hierarchy.
+
+### 2. Decentralized Knowledge
+Knowledge is not a monolith. Each channel maintains its own `KNOWLEDGE.md`, allowing for context-aware intelligence that stays relevant to the conversation it grew from.
+
+### 3. The Steward (管家)
+The reactive heart. The Steward observes the channels and rituals, fulfilling intent inscribed on the blackboards using iterative **ReAct loops**.
+
+### 4. The Guardian (守护者)
+The proactive soul. While the Steward is reactive, the Guardian is observational—auditing health, distilling history into knowledge, and ensuring the foundations remain solid.
+
+---
+
+## 🛠️ Primitive Capabilities
+
+Tellar adheres to the **pi-mono** standard, providing the essential tools:
+- **`read`**: Perception of the foundations with offset/limit precision.
+- **`write`**: Persistence of intent and memory.
+- **`edit`**: Surgical, safe modification of existing state.
+- **`bash`**: Direct, scoped action on the environment.
+
+Advanced capabilities like **Image Generation** or **Notifications** are implemented as pluggable **Skills**.
+
+---
 
 ## 🚀 Getting Started
 
-### Prerequisites
-- [Rust](https://rust-lang.org) (stable)
-- A Discord Bot Token (with Message Content Intent enabled)
-
 ### Installation
+Tellar is a single-binary portable engine written in Rust.
+
 ```bash
-git clone https://github.com/dagow/tellar.git
+git clone https://github.com/eric9n/tellar.git
 cd tellar
 cargo install --path .
 ```
 
 ### Setup
-Tellar is **single-binary portable**. On first run, it detects if your configuration is empty and guides you through an **Interactive Setup**:
+Run Tellar to enter the **Interactive Setup**:
 
 ```bash
 tellar --guild ./my-guild
 ```
 
-1. Enter your Gemini API Key when prompted.
-2. Select a model (e.g., `gemini-3-flash-preview`) from the list.
-3. Tellar will automatically prepare your **`tellar.yml`**.
-4. Configure your Steward's personality in `./my-guild/agents/AGENTS.md`.
-5. Start Tellar and invite the bot to your server.
+1. **Inscribe Keys**: Provide your Gemini API Key and Discord Token.
+2. **Select a Brain**: Choose from available Gemini models.
+3. **Define Identity**: Edit `agents/AGENTS.md` to shape your Steward's personality.
 
+### Per-Channel Customization
+Tellar supports unique identities for different channels. Place `<CHANNEL_ID>.AGENTS.md` in your `agents/` directory to supplement the base instructions for specific contexts.
+
+---
+
+## 🎭 Ritual Mode
+To execute complex tasks, create a **Ritual** in the `rituals/` directory. Rituals support:
+- **Schedules**: Use cron expressions for recurring maintenance.
+- **Status Tracking**: Move tasks from `[ ]` to `[x]` as the Steward progresses.
+- **Shared Vision**: Attach images or context that the Steward can perceive and act upon.
+
+---
 
 ## ⚖️ License
 Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
-*Built with ❤️ for those who treat their Discord servers as temples of knowledge.*
+*Built for those who treat their Discord servers as temples of knowledge.*
