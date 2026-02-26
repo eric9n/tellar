@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     // 3. Command Handling
     match args.command.unwrap_or(Commands::Run) {
         Commands::Setup => {
-            init::run_interactive_setup(&guild_path, &mut config).await?;
+            let _ = init::run_interactive_setup(&guild_path, &mut config).await?;
             return Ok(());
         }
         Commands::Run => {
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             if (config.gemini.api_key.contains("YOUR_") || config.discord.token.contains("YOUR_")) 
                && atty::is(atty::Stream::Stdin) {
                 println!("✨ Placeholder configuration detected. Entering setup...");
-                init::run_interactive_setup(&guild_path, &mut config).await?;
+                let _ = init::run_interactive_setup(&guild_path, &mut config).await?;
             }
         }
     }

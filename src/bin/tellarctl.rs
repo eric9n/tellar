@@ -67,17 +67,17 @@ async fn main() -> anyhow::Result<()> {
             });
 
             // 3. Run interactive Key/Model/Systemd path setup
-            init::run_interactive_setup(&guild_path, &mut config).await?;
+            let final_guild_path = init::run_interactive_setup(&guild_path, &mut config).await?;
 
             // 4. Finalize Systemd Service Installation
-            println!("\n� Finalizing systemd service installation...");
+            println!("\n🔧 Finalizing systemd service installation...");
             if !systemd_user_dir.exists() {
                 fs::create_dir_all(&systemd_user_dir).context("Failed to create systemd user directory")?;
             }
 
             // The setup logic in init.rs already updated scripts/tellar.service
             // We just need to copy it to the systemd directory
-            let service_template = guild_path.join("scripts").join("tellar.service");
+            let service_template = final_guild_path.join("scripts").join("tellar.service");
             if service_template.exists() {
                 fs::copy(&service_template, &target_service_path).context("Failed to copy service file")?;
                 println!("✅ Service file installed at {:?}", target_service_path);
