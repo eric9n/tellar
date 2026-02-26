@@ -146,23 +146,29 @@ pub async fn run_interactive_setup(base_path: &Path, config: &mut crate::config:
         Err(e) => eprintln!("⚠️ Failed to fetch models: {}. Using default.", e),
     }
 
-    // 4. Systemd Path Replacement (Mandatory for robust service)
-    let abs_base_path = fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
-    let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tellar"));
-    
-    println!("\n⚙️  Applying absolute paths to systemd service template...");
-    let service_template = abs_base_path.join("scripts").join("tellar.service");
-    if service_template.exists() {
-        let content = fs::read_to_string(&service_template)?;
-        let updated = content
-            .replace("{{GUILD_PATH}}", &abs_base_path.to_string_lossy())
-            .replace("{{BINARY_PATH}}", &binary_path.to_string_lossy());
-        fs::write(&service_template, updated)?;
-        println!("✅ Updated scripts/tellar.service:");
-        println!("   - Guild: {}", abs_base_path.display());
-        println!("   - Binary: {}", binary_path.display());
-    } else {
-        println!("⚠️ scripts/tellar.service template not found at {:?}", service_template);
+    // 4. Systemd Path Replacement (Optional)
+    println!("\n⚙️  Do you want to update the systemd service file with current paths? (y/N)");
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut choice = String::new();
+    std::io::stdin().read_line(&mut choice)?;
+    if choice.trim().to_lowercase() == "y" {
+        let abs_base_path = fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
+        let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tellar"));
+        
+        let service_template = abs_base_path.join("scripts").join("tellar.service");
+        if service_template.exists() {
+            let content = fs::read_to_string(&service_template)?;
+            let updated = content
+                .replace("{{GUILD_PATH}}", &abs_base_path.to_string_lossy())
+                .replace("{{BINARY_PATH}}", &binary_path.to_string_lossy());
+            fs::write(&service_template, updated)?;
+            println!("✅ Updated scripts/tellar.service:");
+            println!("   - Guild: {}", abs_base_path.display());
+            println!("   - Binary: {}", binary_path.display());
+        } else {
+            println!("⚠️ scripts/tellar.service template not found at {:?}", service_template);
+        }
     }
 
     // 5. Persist updated config
