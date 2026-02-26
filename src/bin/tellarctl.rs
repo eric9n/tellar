@@ -125,7 +125,9 @@ async fn run_setup(guild_path: &Path) -> Result<()> {
         println!("\n⚙️  Linux detected. Preparing systemd service...");
         if let Some(service_file) = ASSETS.get_file("tellar.service") {
             let template = service_file.contents_utf8().context("Invalid service template")?;
-            let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tellar"));
+            let current_exe = std::env::current_exe().ok();
+            let binary_path = current_exe.and_then(|p| p.parent().map(|d| d.join("tellar")))
+                .unwrap_or_else(|| PathBuf::from("tellar"));
             let abs_guild = fs::canonicalize(guild_path).unwrap_or_else(|_| guild_path.to_path_buf());
             
             let updated = template
