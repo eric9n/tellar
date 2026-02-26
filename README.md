@@ -84,10 +84,10 @@ To execute complex tasks, create a **Ritual** in the `rituals/` directory. Ritua
 To run Tellar as a persistent service on Ubuntu, use the provided management script:
 
 1. **Install Binary**: Run `cargo install --path .` to install Tellar to `~/.cargo/bin/tellar`.
-2. **Setup Service**: Run the management script with the **absolute path** to your guild (defaults to `~/.tellar` if omitted):
+2. **Setup Service**: Run the management script with the **absolute path** to your guild (defaults to `~/.tellar/guild` if omitted):
    ```bash
    chmod +x scripts/manage.sh
-   ./scripts/manage.sh setup                # Defaults to ~/.tellar
+   ./scripts/manage.sh setup                # Defaults to ~/.tellar/guild
    # OR
    ./scripts/manage.sh setup /path/to/guild # Custom path
    ```

@@ -15,7 +15,7 @@ show_usage() {
 
 case "$1" in
     setup)
-        GUILD_PATH="${2:-$HOME/.tellar}"
+        GUILD_PATH="${2:-$HOME/.tellar/guild}"
         
         # Convert to absolute path
         ABS_GUILD_PATH=$(realpath -m "$GUILD_PATH")

@@ -51,6 +51,7 @@ pub fn resolve_guild_path(cli_guild: Option<PathBuf>) -> PathBuf {
     home_dir()
         .expect("Could not locate home directory")
         .join(".tellar")
+        .join("guild")
 }
 
 /// Persist guild path
