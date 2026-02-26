@@ -15,10 +15,23 @@ show_usage() {
 
 case "$1" in
     setup)
-        echo "🕯️ Setting up Tellar service..."
+        GUILD_PATH="$2"
+        if [ -z "$GUILD_PATH" ]; then
+            echo "❌ Error: Please specify the absolute path to your guild directory."
+            echo "Usage: $0 setup /path/to/your/guild"
+            exit 1
+        fi
+
+        # Convert to absolute path if it is relative
+        ABS_GUILD_PATH=$(realpath "$GUILD_PATH")
+
+        echo "🕯️ Setting up Tellar service with guild: $ABS_GUILD_PATH"
         mkdir -p "$SYSTEMD_USER_DIR"
-        cp "$SERVICE_FILE" "$TARGET_SERVICE_PATH"
-        echo "✅ Service file copied to $TARGET_SERVICE_PATH"
+        
+        # Inject the path into the service file using sed
+        sed "s|{{GUILD_PATH}}|$ABS_GUILD_PATH|g" "$SERVICE_FILE" > "$TARGET_SERVICE_PATH"
+        
+        echo "✅ Service file created at $TARGET_SERVICE_PATH"
         
         systemctl --user daemon-reload
         systemctl --user enable $SERVICE_NAME

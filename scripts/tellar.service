@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-# Ensure you replace /path/to/your/guild with the absolute path to your guild directory
-WorkingDirectory=%h/tellar-guild
-ExecStart=%h/.cargo/bin/tellar --guild %h/tellar-guild
+# The setup script will replace {{GUILD_PATH}} with your actual guild directory
+WorkingDirectory={{GUILD_PATH}}
+ExecStart=%h/.cargo/bin/tellar --guild {{GUILD_PATH}}
 Restart=always
 RestartSec=10
 # Standard output/error logging
