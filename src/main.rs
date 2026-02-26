@@ -18,20 +18,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Tellar - 极简文档驱动型赛博管家", long_about = None)]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
     /// 盟友会馆 (Guild) 目录 (默认: ~/.tellar)
     #[arg(short, long, global = true)]
     guild: Option<PathBuf>,
-}
-
-#[derive(clap::Subcommand, Debug)]
-enum Commands {
-    /// Start the steward in reactive blackboard mode (default)
-    Run,
-    /// Interactive setup for API keys and systemd
-    Setup,
 }
 
 #[tokio::main]
@@ -47,28 +36,25 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let guild_path = init::resolve_guild_path(args.guild);
     
-    // 1. Initialize foundations (always ensures folders exist)
-    init::initialize_guild(&guild_path)?;
-    let config_file = guild_path.join("tellar.yml");
-    let mut config = Config::load(&config_file)?;
-
-    // 3. Command Handling
-    match args.command.unwrap_or(Commands::Run) {
-        Commands::Setup => {
-            let _ = init::run_interactive_setup(&guild_path, &mut config).await?;
-            return Ok(());
-        }
-        Commands::Run => {
-            // Check for placeholders and prompt ONLY if running interactively
-            if (config.gemini.api_key.contains("YOUR_") || config.discord.token.contains("YOUR_")) 
-               && atty::is(atty::Stream::Stdin) {
-                println!("✨ Placeholder configuration detected. Entering setup...");
-                let _ = init::run_interactive_setup(&guild_path, &mut config).await?;
-            }
-        }
+    // 1. Strict check: Guild must exist (no auto-init)
+    if !guild_path.exists() {
+        eprintln!("❌ Guild directory not found at: {:?}", guild_path);
+        eprintln!("💡 Please run 'tellarctl setup' first to initialize your Cyber Steward.");
+        std::process::exit(1);
     }
 
-    println!("🚀 Tellar engine is cold-starting into Reactive Blackboard mode...");
+    // 2. Load configuration
+    let config_file = guild_path.join("tellar.yml");
+    if !config_file.exists() {
+        eprintln!("❌ Configuration file not found at: {:?}", config_file);
+        eprintln!("💡 Please run 'tellarctl setup' to configure your API keys.");
+        std::process::exit(1);
+    }
+    let config = Config::load(&config_file)?;
+
+    // 3. Start Steward
+    println!("🌳 Guild: {}", guild_path.display());
+    println!("🕯️  Waking up the Cyber Steward...");
     println!("Guild foundation: {:?}", guild_path);
     println!("📖 Configuration loaded successfully!");
 
