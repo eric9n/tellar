@@ -59,12 +59,14 @@ cargo install --path .
 Run Tellar to enter the **Interactive Setup**:
 
 ```bash
+tellar                # Defaults to ~/.tellar/guild
+# OR
 tellar --guild ./my-guild
 ```
 
 1. **Inscribe Keys**: Provide your Gemini API Key and Discord Token.
 2. **Select a Brain**: Choose from available Gemini models.
-3. **Define Identity**: Edit `agents/AGENTS.md` to shape your Steward's personality.
+3. **Define Identity**: Edit your Steward's personality in `agents/AGENTS.md`.
 
 ### Per-Channel Customization
 Tellar supports unique identities for different channels. Place `<CHANNEL_ID>.AGENTS.md` in your `agents/` directory to supplement the base instructions for specific contexts.
