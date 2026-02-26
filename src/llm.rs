@@ -50,13 +50,14 @@ pub async fn generate_multimodal(
     api_key: &str,
     model: &str,
     temperature: f32,
+    tools: Option<serde_json::Value>,
 ) -> anyhow::Result<String> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, api_key
     );
 
-    let payload = json!({
+    let mut payload = json!({
         "systemInstruction": {
             "parts": [{ "text": system_prompt }]
         },
@@ -71,6 +72,10 @@ pub async fn generate_multimodal(
         }
     });
 
+    if let Some(t) = tools {
+        payload["tools"] = t;
+    }
+
     let response = POOLED_CLIENT.post(url)
         .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
         .json(&payload)
@@ -82,26 +87,50 @@ pub async fn generate_multimodal(
         return Err(anyhow::anyhow!("Gemini API Error (Model: {}): {}", model, error_text));
     }
 
-
     let res_json: serde_json::Value = response.json().await?;
+    let parts = &res_json["candidates"][0]["content"]["parts"];
     
-    // Check for safety filter or other finish reasons
-    let first_candidate = &res_json["candidates"][0];
-    let content = match first_candidate["content"]["parts"][0]["text"].as_str() {
-        Some(text) => text.to_string(),
-        None => {
-            let reason = first_candidate["finishReason"].as_str().unwrap_or("UNKNOWN");
-            let msg = if reason == "SAFETY" {
-                format!("Gemini blocked the response due to SAFETY filters. Check your prompt or history context.")
-            } else {
-                format!("Gemini returned no content. Finish Reason: {}. Response: {}", reason, res_json)
-            };
-            eprintln!("🔴 [LLM ERROR] {}", msg);
-            return Err(anyhow::anyhow!(msg));
+    if parts.is_array() {
+        let mut text_acc = String::new();
+        let mut function_call: Option<&serde_json::Value> = None;
+
+        for part in parts.as_array().unwrap() {
+            if let Some(text) = part["text"].as_str() {
+                text_acc.push_str(text);
+            }
+            if part.get("functionCall").is_some() {
+                function_call = Some(&part["functionCall"]);
+                break; // Gemini usually sends one function call at the end of parts
+            }
         }
+
+        if let Some(call) = function_call {
+            let name = call["name"].as_str().unwrap_or("unknown");
+            let args = call["args"].clone();
+            
+            // Translate native call to our internal JSON ReAct format
+            let react_json = json!({
+                "thought": if text_acc.is_empty() { "Natural function call triggered." } else { text_acc.trim() },
+                "tool": name,
+                "args": args
+            });
+            return Ok(serde_json::to_string(&react_json).unwrap());
+        }
+
+        if !text_acc.is_empty() {
+            return Ok(text_acc);
+        }
+    }
+
+    // Fallback if no text or function call was found
+    let reason = res_json["candidates"][0]["finishReason"].as_str().unwrap_or("UNKNOWN");
+    let msg = if reason == "SAFETY" {
+        format!("Gemini blocked the response due to SAFETY filters. Check your prompt or history context.")
+    } else {
+        format!("Gemini returned no content. Finish Reason: {}. Response: {}", reason, res_json)
     };
-    
-    Ok(content)
+    eprintln!("🔴 [LLM ERROR] {}", msg);
+    Err(anyhow::anyhow!(msg))
 }
 
 /// Fetch available models from Gemini API

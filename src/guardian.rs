@@ -108,7 +108,8 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
             messages.clone(),
             &config.gemini.api_key,
             guard_model,
-            0.5
+            0.5,
+            Some(serde_json::json!([{ "functionDeclarations": tools }]))
         ).await?;
 
 

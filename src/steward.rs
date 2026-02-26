@@ -294,7 +294,8 @@ async fn run_react_loop(task: &str, full_context: &str, path: &Path, base_path: 
             messages.clone(),
             &config.gemini.api_key,
             &config.gemini.model,
-            0.5
+            0.5,
+            Some(serde_json::json!([{ "functionDeclarations": tools }]))
         ).await?;
 
         // 1. Parse structured JSON (Robustly handle Markdown code blocks)
@@ -395,7 +396,8 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
         user_parts,
         &config.gemini.api_key,
         &config.gemini.model,
-        0.7
+        0.7,
+        None
     ).await?;
 
     // Parse structured JSON to prevent leaks in conversational mode
