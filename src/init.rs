@@ -47,11 +47,18 @@ pub fn resolve_guild_path(cli_guild: Option<PathBuf>) -> PathBuf {
         }
     }
 
-    // 4. Default path
-    home_dir()
+    // 4. Default path: ~/.tellar/guild
+    let default_path = home_dir()
         .expect("Could not locate home directory")
         .join(".tellar")
-        .join("guild")
+        .join("guild");
+    
+    // Create the default path if it doesn't exist to ensure CHDIR works immediately
+    if !default_path.exists() {
+        let _ = fs::create_dir_all(&default_path);
+    }
+    
+    default_path
 }
 
 /// Persist guild path
