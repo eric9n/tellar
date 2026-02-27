@@ -2211,6 +2211,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serenity",
+ "tempfile",
  "tokio",
  "tokio-cron-scheduler",
  "uuid",

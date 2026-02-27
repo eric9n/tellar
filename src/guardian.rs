@@ -7,12 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
+use crate::agent_loop::execute_tool_batch;
 use crate::config::Config;
 use crate::llm;
-use crate::steward;
+use crate::tools::{get_tool_definitions, ToolBatchState, CORE_TOOL_NAMES};
 use std::fs;
-use serde_json::Value;
-
 pub async fn run_guardian_loop(base_path: PathBuf, config: Config) -> anyhow::Result<()> {
     println!("🛡️ The Guardian has taken its post. Vigilance is eternal.");
     
@@ -52,7 +51,7 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
     let system_prompt = fs::read_to_string(guardian_prompt_path)
         .unwrap_or_else(|_| "You are the Guardian of the Guild. Monitor and maintain.".to_string());
 
-    let tools = steward::get_tool_definitions(base_path);
+    let tools = get_tool_definitions(base_path);
 
     // 1. Gather environmental context
     let mut env_context = String::new();
@@ -84,8 +83,9 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
         llm::Message {
             role: llm::MessageRole::User,
             parts: vec![llm::MultimodalPart::text(format!(
-                "{}\n\nAvailable Tools:\n{}\n\nPerform a proactive maintenance turn. If you find information in history that isn't distilled, use 'write' or 'edit' to update KNOWLEDGE.md. If you see anomalies, create a ritual.", 
+                "{}\n\nCore Tools: {}\n\nAvailable Tool Declarations:\n{}\n\nPerform a proactive maintenance turn. Prefer the core tools for inspection and memory maintenance. Use a discovered skill only when you need a domain-specific capability. If you find information in history that isn't distilled, use 'write' or 'edit' to update KNOWLEDGE.md. If you see anomalies, create a ritual.", 
                 env_context,
+                CORE_TOOL_NAMES.join(", "),
                 serde_json::to_string_pretty(&tools).unwrap_or_default()
             ))]
         }
@@ -93,6 +93,11 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
 
     let mut turn = 0;
     let max_turns = 3; // Guardian turns are more expensive/broader
+    let guardian_blackboard = base_path.join("brain").join(".guardian-runtime.md");
+    if !guardian_blackboard.exists() {
+        let _ = fs::write(&guardian_blackboard, "");
+    }
+    let mut batch_state = ToolBatchState::default();
 
     while turn < max_turns {
         turn += 1;
@@ -105,7 +110,7 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
 
         println!("🛡️ Guardian Pulse using model: {}", guard_model);
 
-        let result = llm::generate_multimodal(
+        let turn_result = llm::generate_turn(
             &system_prompt,
             messages.clone(),
             &config.gemini.api_key,
@@ -113,59 +118,43 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
             0.5,
             Some(serde_json::json!([{ "functionDeclarations": tools }]))
         ).await?;
-
-        let tool_call: Value = match steward::parse_llm_json(&result) {
-            Some(v) => v,
-            None => {
+        match turn_result {
+            llm::ModelTurn::Narrative(result) => {
                 println!("🛡️ Guardian finished pulse with narrative: {}", result);
+                messages.push(llm::Message {
+                    role: llm::MessageRole::Assistant,
+                    parts: vec![llm::MultimodalPart::text(result)],
+                });
                 return Ok(());
             }
-        };
+            llm::ModelTurn::ToolCalls { thought, calls, parts } => {
+                if let Some(thought) = thought.as_ref() {
+                    println!("🛡️ Guardian Thought: {}", thought);
+                }
 
-        let mut assistant_parts = Vec::new();
-        if let Some(thought) = tool_call["thought"].as_str() {
-            println!("🛡️ Guardian Thought: {}", thought);
-            assistant_parts.push(llm::MultimodalPart::text(format!("Thought: {}", thought)));
-        }
+                let assistant_parts = if parts.is_empty() {
+                    thought
+                        .as_ref()
+                        .map(|value| vec![llm::MultimodalPart::text(format!("Thought: {}", value))])
+                        .unwrap_or_default()
+                } else {
+                    parts
+                };
 
-        if let Some(finish_msg) = tool_call["finish"].as_str() {
-            println!("🛡️ Guardian Task Finished: {}", finish_msg);
-            return Ok(());
-        }
-
-        if let Some(tool_name) = tool_call["tool"].as_str() {
-            let default_args = serde_json::json!({});
-            let args = tool_call.get("args").unwrap_or(&default_args);
-            println!("🛡️ Guardian Action: `{}`", tool_name);
-            
-            // Record tool call
-            let parts: Vec<llm::MultimodalPart> = if let Some(full_parts) = tool_call.get("full_parts") {
-                serde_json::from_value(full_parts.clone()).unwrap_or_else(|_| assistant_parts)
-            } else {
-                assistant_parts
-            };
-
-            messages.push(llm::Message {
-                role: llm::MessageRole::Assistant,
-                parts,
-            });
-
-            // Execute
-            let observation = steward::dispatch_tool(tool_name, args, base_path, config, "0").await;
-            println!("🛡️ Guardian Observation: [{} characters]", observation.len());
-            
-            // Record result
-            messages.push(llm::Message {
-                role: llm::MessageRole::ToolResult,
-                parts: vec![llm::MultimodalPart::function_response(tool_name, serde_json::json!({ "output": observation }))],
-            });
-        } else {
-            // Narrative finish
-            messages.push(llm::Message {
-                role: llm::MessageRole::Assistant,
-                parts: vec![llm::MultimodalPart::text(result)],
-            });
-            return Ok(());
+                messages.push(llm::Message {
+                    role: llm::MessageRole::Assistant,
+                    parts: assistant_parts,
+                });
+                execute_tool_batch(
+                    &mut messages,
+                    &calls,
+                    &guardian_blackboard,
+                    base_path,
+                    config,
+                    &mut batch_state,
+                )
+                .await?;
+            }
         }
     }
 

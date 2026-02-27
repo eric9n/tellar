@@ -48,6 +48,23 @@ pub struct InlineData {
     pub data: String, // Base64
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ToolCallRequest {
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelTurn {
+    Narrative(String),
+    ToolCalls {
+        thought: Option<String>,
+        calls: Vec<ToolCallRequest>,
+        parts: Vec<MultimodalPart>,
+    },
+}
+
 impl MultimodalPart {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
@@ -74,38 +91,55 @@ impl MultimodalPart {
         }
     }
     
-    pub fn function_call(name: &str, args: serde_json::Value, thought_signature: Option<String>) -> Self {
+    pub fn function_call(
+        name: &str,
+        args: serde_json::Value,
+        thought_signature: Option<String>,
+        id: Option<String>,
+    ) -> Self {
         Self {
             text: None,
             inline_data: None,
-            function_call: Some(json!({ "name": name, "args": args })),
+            function_call: Some(json!({
+                "name": name,
+                "args": args,
+                "id": id
+            })),
             function_response: None,
             thought_signature,
             thought: None,
         }
     }
 
-    pub fn function_response(name: &str, response: serde_json::Value) -> Self {
+    pub fn function_response(
+        name: &str,
+        response: serde_json::Value,
+        id: Option<String>,
+    ) -> Self {
         Self {
             text: None,
             inline_data: None,
             function_call: None,
-            function_response: Some(json!({ "name": name, "response": response })),
+            function_response: Some(json!({
+                "name": name,
+                "response": response,
+                "id": id
+            })),
             thought_signature: None,
             thought: None,
         }
     }
 }
 
-/// Call Gemini API with full message history (pi-mono style)
-pub async fn generate_multimodal(
+/// Call Gemini API with full structured message history and native tool calling.
+pub async fn generate_turn(
     system_prompt: &str,
     history: Vec<Message>,
     api_key: &str,
     model: &str,
     temperature: f32,
     tools: Option<serde_json::Value>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ModelTurn> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, api_key
@@ -166,28 +200,40 @@ pub async fn generate_multimodal(
             }
         }
 
-        // If there are function calls, translate to our ReAct JSON for the loop to handle
+        // If there are function calls, return a structured tool-calling turn for the loop.
         if !function_calls.is_empty() {
-            let call = function_calls[0]; // Currently Tellar handles one at a time
-            let name = call["name"].as_str().unwrap_or("unknown");
-            let args = call["args"].clone();
-            
-            // Extract thoughtSignature if present on any part
-            let thought_signature = parts.as_array().unwrap().iter()
-                .find_map(|p| p["thoughtSignature"].as_str());
+            let mut calls = Vec::new();
+            for (index, call) in function_calls.iter().enumerate() {
+                let name = call["name"].as_str().unwrap_or("unknown").to_string();
+                let raw_id = call["id"].as_str().map(str::to_string);
+                let fallback_id = format!("{}_{}", name, index);
+                calls.push(ToolCallRequest {
+                    id: raw_id.unwrap_or(fallback_id),
+                    name,
+                    args: call["args"].as_object()
+                        .map(|_| call["args"].clone())
+                        .unwrap_or_else(|| json!({})),
+                });
+            }
 
-            let react_json = json!({
-                "thought": if text_acc.is_empty() { "Tool call triggered." } else { text_acc.trim() },
-                "tool": name,
-                "args": args,
-                "thought_signature": thought_signature,
-                "full_parts": parts // CRITICAL: Preserve original parts to avoid signature move/merge
+            let thought = if text_acc.trim().is_empty() {
+                None
+            } else {
+                Some(text_acc.trim().to_string())
+            };
+
+            let raw_parts: Vec<MultimodalPart> = serde_json::from_value(parts.clone())
+                .unwrap_or_else(|_| Vec::new());
+
+            return Ok(ModelTurn::ToolCalls {
+                thought,
+                calls,
+                parts: raw_parts,
             });
-            return Ok(serde_json::to_string(&react_json).unwrap());
         }
 
         if !text_acc.is_empty() {
-            return Ok(text_acc);
+            return Ok(ModelTurn::Narrative(text_acc));
         }
     }
 
@@ -252,11 +298,13 @@ mod tests {
         let part = MultimodalPart::function_call(
             "test_tool",
             json!({ "arg1": "val1" }),
-            Some("fake-signature".to_string())
+            Some("fake-signature".to_string()),
+            Some("tool-1".to_string())
         );
         let serialized = serde_json::to_value(&part).unwrap();
         
         assert_eq!(serialized["functionCall"]["name"], "test_tool");
+        assert_eq!(serialized["functionCall"]["id"], "tool-1");
         assert_eq!(serialized["thoughtSignature"], "fake-signature");
     }
 
@@ -265,13 +313,15 @@ mod tests {
         let data = json!({
             "functionCall": {
                 "name": "test_tool",
-                "args": { "arg1": "val1" }
+                "args": { "arg1": "val1" },
+                "id": "tool-1"
             },
             "thoughtSignature": "fake-signature"
         });
         let part: MultimodalPart = serde_json::from_value(data).unwrap();
         
         assert_eq!(part.thought_signature, Some("fake-signature".to_string()));
+        assert_eq!(part.function_call.as_ref().unwrap()["id"], "tool-1");
     }
 
     #[test]
@@ -286,5 +336,18 @@ mod tests {
             .find_map(|p| p["thoughtSignature"].as_str());
             
         assert_eq!(thought_signature, Some("sig123"));
+    }
+
+    #[test]
+    fn test_function_response_serialization_includes_id() {
+        let part = MultimodalPart::function_response(
+            "test_tool",
+            json!({ "output": "ok" }),
+            Some("tool-9".to_string()),
+        );
+        let serialized = serde_json::to_value(&part).unwrap();
+
+        assert_eq!(serialized["functionResponse"]["name"], "test_tool");
+        assert_eq!(serialized["functionResponse"]["id"], "tool-9");
     }
 }

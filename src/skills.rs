@@ -80,6 +80,7 @@ impl SkillMetadata {
 pub async fn execute_skill_tool(
     script_line: &str,
     skill_dir: &Path,
+    workspace_dir: &Path,
     args: &Value,
     config: &crate::config::Config,
 ) -> Result<String> {
@@ -113,6 +114,8 @@ pub async fn execute_skill_tool(
     let output = cmd
         .env("TELLAR_ARGS", &args_json)
         .env("SKILL_DIR", skill_dir)
+        .env("TELLAR_WORKSPACE", workspace_dir)
+        .env("TELLAR_CORE_TOOLS", "ls,grep,read,write,edit")
         .env("GEMINI_API_KEY", &config.gemini.api_key)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

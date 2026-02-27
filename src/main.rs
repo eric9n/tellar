@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Tellar - 极简文档驱动型赛博管家", long_about = None)]
+#[command(author, version, about = "Tellar - Minimal Document-Driven Cyber Steward", long_about = None)]
 struct Cli {
     /// 盟友会馆 (Guild) 目录 (默认: ~/.tellar)
     #[arg(short, long, global = true)]

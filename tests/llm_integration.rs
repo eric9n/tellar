@@ -1,9 +1,10 @@
-use tellar::llm;
-use serde_json::json;
+use tellar::{llm, steward};
 use std::env;
+use std::fs;
+use tempfile::tempdir;
 
 #[tokio::test]
-async fn test_gemini_tool_call_with_thought_signature() {
+async fn test_full_agent_turn_with_gemini_3() {
     let api_key = match env::var("GEMINI_API_KEY") {
         Ok(key) => key,
         Err(_) => {
@@ -12,57 +13,74 @@ async fn test_gemini_tool_call_with_thought_signature() {
         }
     };
 
-    let model = "gemini-3-flash-preview"; // Use the user's preferred model
+    // 1. Setup a temporary guild environment for tools to work
+    let dir = tempdir().expect("Failed to create temp dir");
+    let base_path = dir.path();
+    
+    // Create folders required for steward/guardian
+    fs::create_dir_all(base_path.join("agents")).unwrap();
+    fs::create_dir_all(base_path.join("brain")).unwrap();
+    fs::write(base_path.join("agents").join("AGENTS.md"), "You are Tellar, a helpful assistant.").unwrap();
+    
+    let config = tellar::config::Config {
+        gemini: tellar::config::GeminiConfig {
+            api_key: api_key.clone(),
+            model: "gemini-3-flash-preview".to_string(),
+        },
+        discord: tellar::config::DiscordConfig {
+            token: "fake".to_string(),
+            guild_id: None,
+            channel_mappings: None,
+        },
+        guardian: None,
+    };
+
+    // 2. Prepare initial state
     let system_prompt = "You are a helpful assistant.";
-    let history = vec![
+    fs::create_dir_all(base_path.join("docs")).unwrap();
+    fs::write(
+        base_path.join("docs").join("report.txt"),
+        "alpha\nproject_token=delta-42\nomega\n",
+    )
+    .unwrap();
+    let path = base_path.join("test.md");
+    fs::write(&path, "User: Please find the token in docs/report.txt").unwrap();
+
+    let initial_messages = vec![
         llm::Message {
             role: llm::MessageRole::User,
-            parts: vec![llm::MultimodalPart::text("list files in the current directory")],
+            parts: vec![llm::MultimodalPart::text(
+                "Find the value of `project_token` inside the guild and tell me the exact value. Use the available tools."
+            )],
         }
     ];
 
-    let tools = json!([
-        {
-            "name": "sh",
-            "description": "Execute a shell command",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command to run" }
-                },
-                "required": ["command"]
-            }
-        }
-    ]);
-
-    println!("🚀 Calling Gemini API to trigger a tool call...");
-    let result = llm::generate_multimodal(
-        system_prompt,
-        history,
-        &api_key,
-        model,
-        0.5,
-        Some(json!([{ "functionDeclarations": tools }]))
+    println!("🚀 Starting full multi-turn agent loop...");
+    
+    // 3. Run the actual agent loop
+    // We expect the model to use built-in tools (ls/grep/read) and then answer.
+    let result = steward::run_agent_loop(
+        initial_messages,
+        &path,
+        base_path,
+        &config,
+        "0",
+        system_prompt
     ).await;
 
     match result {
-        Ok(json_str) => {
-            println!("📥 Received response: {}", json_str);
-            let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("Result should be JSON");
-            
-            assert!(parsed.get("tool").is_some(), "Should have a tool call");
-            assert_eq!(parsed["tool"], "sh");
-            
-            // Check if thought_signature is present. 
-            // Note: Gemini 1.5 might not always return it if thinking mode isn't explicitly requested,
-            // but for Gemini 3 preview it's mandatory. 
-            // We'll at least verify the field exists in our protocol.
-            if parsed.get("thought_signature").is_some() {
-                println!("✅ Success: thought_signature preserved: {:?}", parsed["thought_signature"]);
-            } else {
-                println!("⚠️ Note: thought_signature not returned by this model version, but field is supported.");
-            }
+        Ok(final_answer) => {
+            println!("✅ Multi-turn loop completed successfully!");
+            println!("📥 Final Answer: {}", final_answer);
+            assert!(final_answer.contains("delta-42"));
         },
-        Err(e) => panic!("Gemini API Error: {}", e),
+        Err(e) => {
+            let err_str = format!("{:?}", e);
+            // Check if this is the signature error
+            if err_str.contains("thought_signature") || err_str.contains("INVALID_ARGUMENT") {
+                panic!("❌ Gemini 3 rejected history in Turn 2! Error: {}", err_str);
+            }
+            panic!("❌ Agent loop failed with error: {}", e);
+        }
     }
 }

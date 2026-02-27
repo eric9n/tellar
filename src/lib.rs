@@ -5,8 +5,13 @@
  */
 
 pub mod config;
+pub mod context;
+pub mod agent_loop;
 pub mod llm;
+pub mod session;
 pub mod steward;
+pub mod thread_runtime;
+pub mod tools;
 pub mod rhythm;
 pub mod discord;
 pub mod guardian;
