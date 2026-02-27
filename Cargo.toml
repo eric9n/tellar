@@ -14,7 +14,7 @@ strip = true             # Remove debug symbols
 # Async runtime
 tokio = { version = "1.38", features = ["full"] }
 # Network requests (LLM API & Webhook)
-reqwest = { version = "0.12", features = ["json", "default-tls"] }
+reqwest = { version = "0.13", features = ["json", "default-tls"] }
 
 
 # Serialization
@@ -34,8 +34,8 @@ serenity = { version = "0.12", default-features = false, features = [
 
 futures-util = "0.3"
 # Folder monitoring / CRON tasks
-notify = "6.1"
-tokio-cron-scheduler = "0.10.0"
+notify = "8.2"
+tokio-cron-scheduler = "0.15.1"
 # Utilities
 regex = "1.10"
 anyhow = "1.0"
