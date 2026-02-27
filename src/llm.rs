@@ -37,6 +37,8 @@ pub struct MultimodalPart {
     pub function_response: Option<serde_json::Value>,
     #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -54,6 +56,7 @@ impl MultimodalPart {
             function_call: None,
             function_response: None,
             thought_signature: None,
+            thought: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl MultimodalPart {
             function_call: None,
             function_response: None,
             thought_signature: None,
+            thought: None,
         }
     }
     
@@ -77,6 +81,7 @@ impl MultimodalPart {
             function_call: Some(json!({ "name": name, "args": args })),
             function_response: None,
             thought_signature,
+            thought: None,
         }
     }
 
@@ -87,6 +92,7 @@ impl MultimodalPart {
             function_call: None,
             function_response: Some(json!({ "name": name, "response": response })),
             thought_signature: None,
+            thought: None,
         }
     }
 }
@@ -110,7 +116,7 @@ pub async fn generate_multimodal(
         let gemini_role = match msg.role {
             MessageRole::User => "user",
             MessageRole::Assistant => "model",
-            MessageRole::ToolResult => "function", // In the history, results use 'function' role
+            MessageRole::ToolResult => "user", // Strict Gemini 3/Vertex often prefers 'user' for function response turns
             MessageRole::System => "user",         // System instructions are handled separately
         };
         json!({
@@ -174,7 +180,8 @@ pub async fn generate_multimodal(
                 "thought": if text_acc.is_empty() { "Tool call triggered." } else { text_acc.trim() },
                 "tool": name,
                 "args": args,
-                "thought_signature": thought_signature
+                "thought_signature": thought_signature,
+                "full_parts": parts // CRITICAL: Preserve original parts to avoid signature move/merge
             });
             return Ok(serde_json::to_string(&react_json).unwrap());
         }
