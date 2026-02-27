@@ -501,12 +501,20 @@ fn load_unified_prompt(base_path: &Path, channel_id: &str) -> String {
 
 /// Helper to parse structured JSON from LLM response, handling markdown blocks
 pub fn parse_llm_json(result: &str) -> Option<Value> {
-    let clean_result = if result.contains("```json") {
-        result.split("```json").nth(1).unwrap_or(result).split("```").next().unwrap_or(result).trim()
-    } else if result.contains("```") {
-        result.split("```").nth(1).unwrap_or(result).split("```").next().unwrap_or(result).trim()
+    let trimmed = result.trim();
+    
+    // 1. Try raw parse first (best for clean JSON)
+    if let Ok(v) = serde_json::from_str(trimmed) {
+        return Some(v);
+    }
+
+    // 2. Try markdown extraction
+    let clean_result = if trimmed.contains("```json") {
+        trimmed.split("```json").nth(1).unwrap_or(trimmed).split("```").next().unwrap_or(trimmed).trim()
+    } else if trimmed.contains("```") {
+        trimmed.split("```").nth(1).unwrap_or(trimmed).split("```").next().unwrap_or(trimmed).trim()
     } else {
-        result.trim()
+        trimmed
     };
 
     serde_json::from_str(clean_result).ok()
@@ -892,5 +900,24 @@ mod tests {
         let _ = fs::remove_file(&path);
         
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_llm_json_robustness() {
+        // Case 1: Simple JSON
+        let simple = r#"{"thought": "test"}"#;
+        assert!(parse_llm_json(simple).is_some());
+
+        // Case 2: Markdown wrapped JSON
+        let wrapped = r#"```json
+{"thought": "test"}
+```"#;
+        assert!(parse_llm_json(wrapped).is_some());
+
+        // Case 3: Nested Markdown (The bug case from Discord)
+        let nested = r#"{"thought": "Check out this json:\n```json\n{\"foo\": \"bar\"}\n```", "tool": "sh", "args": {"command": "ls"}}"#;
+        let parsed = parse_llm_json(nested).expect("Should parse despite nested markdown");
+        assert_eq!(parsed["tool"], "sh");
+        assert!(parsed["thought"].as_str().unwrap().contains("```json"));
     }
 }
