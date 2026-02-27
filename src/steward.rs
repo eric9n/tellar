@@ -225,6 +225,136 @@ async fn execute_thread_file_internal(path: &PathBuf, base_path: &Path, config: 
     Ok(())
 }
 
+/// The Core Generic Agent Loop (pi-mono style)
+pub(crate) async fn run_agent_loop(
+    initial_messages: Vec<llm::Message>,
+    path: &Path,
+    base_path: &Path,
+    config: &Config,
+    channel_id: &str,
+    system_prompt: &str,
+) -> anyhow::Result<String> {
+    let tools = get_tool_definitions(base_path);
+    let mut messages = initial_messages;
+    let max_turns = 50;
+    let mut turn = 0;
+
+    while turn < max_turns {
+        turn += 1;
+        println!("🧠 Turn {}/{}: Reasoning...", turn, max_turns);
+
+        // 🟢 Steering: Reload blackboard to see if user interrupted us
+        update_history_with_steering(&mut messages, path).await?;
+
+        let result = llm::generate_multimodal(
+            system_prompt,
+            messages.clone(),
+            &config.gemini.api_key,
+            &config.gemini.model,
+            0.5,
+            Some(json!([{ "functionDeclarations": tools }]))
+        ).await?;
+
+        // Parse thought/tool/finish
+        let tool_call: Value = match parse_llm_json(&result) {
+            Some(v) => v,
+            None => {
+                println!("⚠️ LLM output was not JSON, assuming final answer.");
+                return Ok(result);
+            }
+        };
+
+        // Standardize Thought
+        let mut assistant_parts = Vec::new();
+        if let Some(thought) = tool_call["thought"].as_str() {
+            println!("💬 Thought: {}", thought);
+            assistant_parts.push(llm::MultimodalPart::text(format!("Thought: {}", thought)));
+        }
+
+        // Handle Finish
+        if let Some(finish_msg) = tool_call["finish"].as_str() {
+            println!("✅ Task completed: {}", finish_msg);
+            return Ok(finish_msg.to_string());
+        }
+
+        // Handle Tool Call
+        if let Some(tool_name) = tool_call["tool"].as_str() {
+            let default_args = json!({});
+            let args = tool_call.get("args").unwrap_or(&default_args);
+            println!("🛠️ Action: `{}`", tool_name);
+
+            // Record the tool call in history
+            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone()));
+            messages.push(llm::Message {
+                role: llm::MessageRole::Assistant,
+                parts: assistant_parts,
+            });
+
+            // Execute
+            let observation = dispatch_tool(tool_name, args, base_path, config, channel_id).await;
+            println!("👁️ Observation: [{} characters]", observation.len());
+
+            // Record result in history
+            messages.push(llm::Message {
+                role: llm::MessageRole::ToolResult,
+                parts: vec![llm::MultimodalPart::function_response(tool_name, json!({ "output": observation }))],
+            });
+
+            // 🟢 Mid-turn Steering: Check if user sent a message precisely WHILE tool was running
+            update_history_with_steering(&mut messages, path).await?;
+        } else {
+            // No tool, No finish, just text
+            messages.push(llm::Message {
+                role: llm::MessageRole::Assistant,
+                parts: vec![llm::MultimodalPart::text(result.clone())],
+            });
+            return Ok(result);
+        }
+    }
+
+    Ok("Max iterations reached.".to_string())
+}
+
+/// Reread the blackboard and inject any NEW messages into the history
+async fn update_history_with_steering(messages: &mut Vec<llm::Message>, path: &Path) -> anyhow::Result<()> {
+    let current_content = fs::read_to_string(path).unwrap_or_default();
+    
+    // Simple heuristic: if the total message count in blackboard appears to have grown
+    // compared to what we have in history, try to find the new chunks.
+    // In a production Tellar, we'd use message IDs, but for now we look for new "Author" blocks
+    // that aren't already represented in our 'User' role messages.
+    
+    // For simplicity in this refactor, we extract all user messages from blackboard 
+    // and see if the last one is DIFFERENT from our last recorded User message.
+    let re_author = Regex::new(r"(?s)\*\*Author\*\*: (.*?) \| \*\*Time\*\*.*?\n\n(.*?)\n").unwrap();
+    let mut blackboard_user_messages = Vec::new();
+    for caps in re_author.captures_iter(&current_content) {
+        let author = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        if !author.contains("Tellar") {
+            blackboard_user_messages.push(body.trim().to_string());
+        }
+    }
+
+    let last_blackboard_msg = blackboard_user_messages.last();
+    let last_history_msg = messages.iter().rev()
+        .find(|m| matches!(m.role, llm::MessageRole::User))
+        .and_then(|m| m.parts.first())
+        .and_then(|p| p.text.as_ref());
+
+    if let Some(new_msg) = last_blackboard_msg {
+        if Some(new_msg) != last_history_msg {
+            println!("📥 Steering: New user message detected mid-loop: '{}'", new_msg);
+            messages.push(llm::Message {
+                role: llm::MessageRole::User,
+                parts: vec![llm::MultimodalPart::text(new_msg.clone())],
+            });
+        }
+    }
+    
+    Ok(())
+}
+
 pub(super) async fn run_react_loop(
     task: &str,
     full_context: &str,
@@ -233,14 +363,11 @@ pub(super) async fn run_react_loop(
     config: &Config,
     channel_id: &str,
 ) -> anyhow::Result<String> {
-    let system_prompt = load_unified_prompt(base_path, channel_id);
-    let tools = get_tool_definitions(base_path);
+    let mut system_prompt_str = load_unified_prompt(base_path, channel_id);
     
     let mut channel_memory = String::new();
-    
     // Check for origin_channel binding
     if let Some((header, _)) = parse_task_document(full_context) {
-
         if let Some(origin_id) = header.origin_channel {
             // Robust Resolution: Always resolve folder by ID suffix anchor
             if let Some(robust_folder) = discord::resolve_folder_by_id(base_path, &origin_id) {
@@ -273,76 +400,25 @@ pub(super) async fn run_react_loop(
         String::new()
     };
 
-    let mut messages = vec![
-        llm::MultimodalPart::text(format!(
-            "### Current Blackboard Context:\n{}\n\n### Your Objective:\nYou are currently processing the step: \"{}\".\nExecute valid tool calls to satisfy this step. Use 'finish' if you are done.",
-            full_context, task
-        ))
+    system_prompt_str.push_str(&format!("\n\n### Semantic Memory (Channel):\n{}\n\n### Semantic Memory (Global):\n{}", channel_memory, global_memory));
+
+    let mut initial_messages = vec![
+        llm::Message {
+            role: llm::MessageRole::User,
+            parts: vec![llm::MultimodalPart::text(format!(
+                "### Current Blackboard Context:\n{}\n\n### Your Objective:\nYou are currently processing the step: \"{}\".\nExecute valid tool calls to satisfy this step. Use 'finish' if you are done.",
+                full_context, task
+            ))]
+        }
     ];
 
-    // Vision support
+    // Vision
     let mut image_parts = extract_and_load_images(full_context, base_path);
-    messages.append(&mut image_parts);
-
-    let system_full = format!(
-        "{}\n\n### Semantic Memory (Channel):\n{}\n\n### Semantic Memory (Global):\n{}\n\nAvailable Tools:\n{}",
-        system_prompt, channel_memory, global_memory, serde_json::to_string_pretty(&tools)?
-    );
-
-    let mut turn = 0;
-    let max_turns = 50;
-
-    while turn < max_turns {
-        turn += 1;
-        println!("🧠 Turn {}/{}: Reasoning...", turn, max_turns);
-
-        let result = llm::generate_multimodal(
-            &system_full,
-            messages.clone(),
-            &config.gemini.api_key,
-            &config.gemini.model,
-            0.5,
-            Some(serde_json::json!([{ "functionDeclarations": tools }]))
-        ).await?;
-
-        // 1. Parse structured JSON (Robustly handle Markdown code blocks)
-        let tool_call: Value = match parse_llm_json(&result) {
-            Some(v) => v,
-            None => {
-                // If not JSON, assume it's a raw thought or finish attempt
-                println!("⚠️ LLM output was not JSON, assuming final answer.");
-                return Ok(result);
-            }
-        };
-
-
-        if let Some(thought) = tool_call["thought"].as_str() {
-            println!("💬 Thought: {}", thought);
-            // Append the thought to the message history so the agent "remembers" its reasoning
-            messages.push(llm::MultimodalPart::text(format!("Thought: {}", thought)));
-        }
-
-        if let Some(finish_msg) = tool_call["finish"].as_str() {
-            println!("✅ Step completed: {}", finish_msg);
-            return Ok(finish_msg.to_string());
-        }
-
-        if let Some(tool_name) = tool_call["tool"].as_str() {
-            let default_args = json!({});
-            let args = tool_call.get("args").unwrap_or(&default_args);
-            println!("🛠️ Action: calling `{}`", tool_name);
-            
-            let output = dispatch_tool(tool_name, args, base_path, config, channel_id).await;
-            println!("👁️ Observation: {}", output);
-            
-            messages.push(llm::MultimodalPart::text(format!("Observation from `{}`: {}", tool_name, output)));
-        } else {
-            // No tool, no finish? Break and return result
-            return Ok(result);
-        }
+    if !image_parts.is_empty() {
+        initial_messages[0].parts.append(&mut image_parts);
     }
 
-    Ok("Max iterations reached without explicit completion.".to_string())
+    run_agent_loop(initial_messages, path, base_path, config, channel_id, &system_prompt_str).await
 }
 
 pub(crate) async fn run_conversational_loop(
@@ -353,7 +429,7 @@ pub(crate) async fn run_conversational_loop(
     trigger_id: Option<String>,
     channel_id: &str,
 ) -> anyhow::Result<String> {
-    let system_prompt = load_unified_prompt(base_path, channel_id);
+    let mut system_prompt_str = load_unified_prompt(base_path, channel_id);
     
     let mut channel_memory = String::new();
     if let Some(parent) = path.parent() {
@@ -362,111 +438,41 @@ pub(crate) async fn run_conversational_loop(
             channel_memory = fs::read_to_string(knowledge_path).unwrap_or_default();
         }
     }
+    system_prompt_str.push_str(&format!("\n\n### Semantic Memory (Channel Knowledge):\n{}", channel_memory));
 
-    // Dynamic Context Discovery: Identify the "Chat Session History" vs "Current User Input"
     let anchor = "> [Tellar]";
-    let (_current_input, guidance) = if let Some(pos) = full_context.rfind(anchor) {
-        // Find the boundary of the last bot response
+    let guidance = if let Some(pos) = full_context.rfind(anchor) {
         let increment = &full_context[pos..];
-        
-        // Use the text after the bot's response block as the "Current Input" (User Request)
         if let Some(msg_start) = increment.find("\n---\n**Author**") {
-             let new_content = &increment[msg_start..].trim();
-             (new_content.to_string(), format!("Treat the entire blackboard above as the background session history. Focus your immediate response on the following NEW messages (the 'Chat Box' input):\n\n{}", new_content))
+             increment[msg_start..].trim().to_string()
         } else {
-             ("".to_string(), "No new messages detected since your last response. Confirm if there is an implicit follow-up or a ritual step needed.".to_string())
+             "Check for follow-up or ritual steps.".to_string()
         }
     } else {
-        // No anchor found: treat entire file as the initial current input
-        (full_context.to_string(), "This is a new session or no previous responses exist. Address the target messages below while considering any context in the full blackboard.".to_string())
+        full_context.to_string()
     };
 
     let mut trigger_instruction = guidance;
-    if let Some(tid) = trigger_id {
-        trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", tid));
+    if let Some(id) = trigger_id {
+        trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
     }
-
     
-    let mut user_parts = vec![llm::MultimodalPart::text(format!(
-        "### Current User Input (Specific Target):\n{}\n\nRespond naturally.",
-        trigger_instruction
-    ))];
+    let mut initial_messages = vec![
+        llm::Message {
+            role: llm::MessageRole::User,
+            parts: vec![llm::MultimodalPart::text(format!(
+                "### Current User Input (Specific Target):\n{}\n\nRespond naturally. Use Markdown. Concise yet premium.",
+                trigger_instruction
+            ))]
+        }
+    ];
 
-    // Vision: Extract images from the ENTIRE blackboard (Session History) 
-    // to ensure visual context persistence (like OpenClaw).
     let mut image_parts = extract_and_load_images(full_context, base_path);
-    user_parts.append(&mut image_parts);
-    
-    let tools = get_tool_definitions(base_path);
-    let mut messages = user_parts.clone();
-    let mut turn = 0;
-    let max_turns = 50;
-
-    let system_prompt_base = system_prompt.clone();
-    let channel_mem_base = channel_memory.clone();
-    let trigger_instr_base = trigger_instruction.clone();
-
-    while turn < max_turns {
-        turn += 1;
-        println!("🧠 Turn {}/{}: Conversational Reasoning...", turn, max_turns);
-
-        // 🟢 DYNAMIC STEERING: Reload context from blackboard file to see new user interruptions
-        let current_context = fs::read_to_string(path).unwrap_or_else(|_| "".to_string());
-        let full_prompt = format!(
-            "{}\n\n### Semantic Memory (Channel Knowledge):\n{}\n\n### Session History (Full Blackboard Context):\n{}\n\n### Current User Input (Specific Target):\n{}\n\nUse Markdown. Concise yet premium.",
-            system_prompt_base,
-            channel_mem_base,
-            current_context,
-            trigger_instr_base
-        );
-
-        let result = llm::generate_multimodal(
-            &full_prompt,
-            messages.clone(),
-            &config.gemini.api_key,
-            &config.gemini.model,
-            0.7,
-            Some(serde_json::json!([{ "functionDeclarations": tools }]))
-        ).await?;
-
-        // Add model's raw output to messages to maintain state
-        messages.push(llm::MultimodalPart::text(result.clone()));
-
-        if let Some(json_val) = parse_llm_json(&result) {
-            if let Some(finish_msg) = json_val["finish"].as_str() {
-                println!("✅ Conversational reply finished on turn {}.", turn);
-                return Ok(finish_msg.to_string());
-            }
-
-            if let Some(tool_name) = json_val["tool"].as_str() {
-                let thought = json_val["thought"].as_str().unwrap_or("Thinking...");
-                println!("💬 Thought: {}", thought);
-                
-                let default_args = serde_json::json!({});
-                let args = json_val.get("args").unwrap_or(&default_args);
-                println!("🛠️  Action: `{}` with args: {}", tool_name, args);
-                
-                let observation = dispatch_tool(tool_name, args, base_path, config, channel_id).await;
-                println!("👁️  Observation: [{} characters]", observation.len());
-                
-                // Append observation to messages for the next turn
-                messages.push(llm::MultimodalPart::text(format!("Observation:\n{}", observation)));
-                continue;
-            }
-        }
-
-        // 🔴 FALLBACK: If no structured JSON but model returned something in later turns,
-        // it likely finished in natural language or gave an explanation.
-        if !result.trim().is_empty() {
-             if turn > 1 {
-                 println!("⚠️  JSON parse failed in turn {}, treating as final response.", turn);
-                 println!("--- RAW RESULT ---\n{}\n------------------", result);
-             }
-             return Ok(result);
-        }
+    if !image_parts.is_empty() {
+        initial_messages[0].parts.append(&mut image_parts);
     }
 
-    Ok("Threshold Reached: I've performed multiple steps but haven't reached a final conclusion yet. Please ask me to continue if needed.".to_string())
+    run_agent_loop(initial_messages, path, base_path, config, channel_id, &system_prompt_str).await
 }
 
 /// Loads the unified system prompt: Base AGENTS.md + optional <CHANNEL_ID>.AGENTS.md
@@ -846,4 +852,44 @@ fn extract_channel_id_from_path(path: &Path) -> String {
     }
 
     "0".to_string()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_steering_detection() -> anyhow::Result<()> {
+        let path = std::env::current_dir()?.join("test_blackboard.md");
+        
+        // 1. Initial State
+        let content = "**Author**: User1 | **Time**: 12:00\n\nHello\n";
+        fs::write(&path, content)?;
+
+        let mut messages = vec![
+            llm::Message {
+                role: llm::MessageRole::User,
+                parts: vec![llm::MultimodalPart::text("Hello".to_string())],
+            }
+        ];
+
+        // Should NOT detect anything new
+        update_history_with_steering(&mut messages, &path).await?;
+        assert_eq!(messages.len(), 1);
+
+        // 2. User interrupts!
+        let new_content = "**Author**: User1 | **Time**: 12:00\n\nHello\n\n---\n**Author**: User1 | **Time**: 12:01\n\nSTOP!\n";
+        fs::write(&path, new_content)?;
+
+        update_history_with_steering(&mut messages, &path).await?;
+        
+        // Should detect "STOP!"
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, llm::MessageRole::User);
+        assert_eq!(messages[1].parts[0].text.as_ref().unwrap(), "STOP!");
+
+        // Cleanup
+        let _ = fs::remove_file(&path);
+        
+        Ok(())
+    }
 }

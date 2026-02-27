@@ -81,13 +81,15 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
     env_context.push_str(&format!("\n### Global Knowledge Baseline:\n{}\n", global_knowledge));
 
     let mut messages = vec![
-        llm::MultimodalPart::text(format!(
-            "{}\n\nAvailable Tools:\n{}\n\nPerform a proactive maintenance turn. If you find information in history that isn't distilled, use 'write' or 'edit' to update KNOWLEDGE.md. If you see anomalies, create a ritual.", 
-            env_context,
-            serde_json::to_string_pretty(&tools).unwrap_or_default()
-        ))
+        llm::Message {
+            role: llm::MessageRole::User,
+            parts: vec![llm::MultimodalPart::text(format!(
+                "{}\n\nAvailable Tools:\n{}\n\nPerform a proactive maintenance turn. If you find information in history that isn't distilled, use 'write' or 'edit' to update KNOWLEDGE.md. If you see anomalies, create a ritual.", 
+                env_context,
+                serde_json::to_string_pretty(&tools).unwrap_or_default()
+            ))]
+        }
     ];
-
 
     let mut turn = 0;
     let max_turns = 3; // Guardian turns are more expensive/broader
@@ -112,7 +114,6 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
             Some(serde_json::json!([{ "functionDeclarations": tools }]))
         ).await?;
 
-
         let tool_call: Value = match steward::parse_llm_json(&result) {
             Some(v) => v,
             None => {
@@ -121,9 +122,10 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
             }
         };
 
+        let mut assistant_parts = Vec::new();
         if let Some(thought) = tool_call["thought"].as_str() {
             println!("🛡️ Guardian Thought: {}", thought);
-            messages.push(llm::MultimodalPart::text(format!("Thought: {}", thought)));
+            assistant_parts.push(llm::MultimodalPart::text(format!("Thought: {}", thought)));
         }
 
         if let Some(finish_msg) = tool_call["finish"].as_str() {
@@ -134,13 +136,30 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
         if let Some(tool_name) = tool_call["tool"].as_str() {
             let default_args = serde_json::json!({});
             let args = tool_call.get("args").unwrap_or(&default_args);
-            println!("🛡️ Guardian Action: calling `{}`", tool_name);
+            println!("🛡️ Guardian Action: `{}`", tool_name);
             
-            let output = steward::dispatch_tool(tool_name, args, base_path, config, "0").await;
-            println!("🛡️ Guardian Observation: {}", output);
+            // Record tool call
+            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone()));
+            messages.push(llm::Message {
+                role: llm::MessageRole::Assistant,
+                parts: assistant_parts,
+            });
+
+            // Execute
+            let observation = steward::dispatch_tool(tool_name, args, base_path, config, "0").await;
+            println!("🛡️ Guardian Observation: [{} characters]", observation.len());
             
-            messages.push(llm::MultimodalPart::text(format!("Observation from `{}`: {}", tool_name, output)));
+            // Record result
+            messages.push(llm::Message {
+                role: llm::MessageRole::ToolResult,
+                parts: vec![llm::MultimodalPart::function_response(tool_name, serde_json::json!({ "output": observation }))],
+            });
         } else {
+            // Narrative finish
+            messages.push(llm::Message {
+                role: llm::MessageRole::Assistant,
+                parts: vec![llm::MultimodalPart::text(result)],
+            });
             return Ok(());
         }
     }

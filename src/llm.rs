@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use serde_json::json;
 use once_cell::sync::Lazy;
 
@@ -9,15 +9,35 @@ static POOLED_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to create pooled reqwest client")
 });
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    #[serde(rename = "function")] // Gemini uses 'function' for tool results in some contexts, but 'model' for assistant. 
+    ToolResult,                   // We'll map this carefully in generate_multimodal.
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Message {
+    pub role: MessageRole,
+    pub parts: Vec<MultimodalPart>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MultimodalPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
     pub inline_data: Option<InlineData>,
+    #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
+    pub function_call: Option<serde_json::Value>,
+    #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
+    pub function_response: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InlineData {
     #[serde(rename = "mimeType")]
     pub mime_type: String,
@@ -29,6 +49,8 @@ impl MultimodalPart {
         Self {
             text: Some(text.into()),
             inline_data: None,
+            function_call: None,
+            function_response: None,
         }
     }
 
@@ -39,14 +61,34 @@ impl MultimodalPart {
                 mime_type: mime_type.into(),
                 data: base64_data.into(),
             }),
+            function_call: None,
+            function_response: None,
+        }
+    }
+    
+    pub fn function_call(name: &str, args: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            inline_data: None,
+            function_call: Some(json!({ "name": name, "args": args })),
+            function_response: None,
+        }
+    }
+
+    pub fn function_response(name: &str, response: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            inline_data: None,
+            function_call: None,
+            function_response: Some(json!({ "name": name, "response": response })),
         }
     }
 }
 
-/// Call Gemini API to generate content with multiple parts (text + images)
+/// Call Gemini API with full message history (pi-mono style)
 pub async fn generate_multimodal(
     system_prompt: &str,
-    user_parts: Vec<MultimodalPart>,
+    history: Vec<Message>,
     api_key: &str,
     model: &str,
     temperature: f32,
@@ -57,16 +99,25 @@ pub async fn generate_multimodal(
         model, api_key
     );
 
+    // Map MessageRole to Gemini roles
+    let contents: Vec<serde_json::Value> = history.into_iter().map(|msg| {
+        let gemini_role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "model",
+            MessageRole::ToolResult => "function", // In the history, results use 'function' role
+            MessageRole::System => "user",         // System instructions are handled separately
+        };
+        json!({
+            "role": gemini_role,
+            "parts": msg.parts
+        })
+    }).collect();
+
     let mut payload = json!({
         "systemInstruction": {
             "parts": [{ "text": system_prompt }]
         },
-        "contents": [
-            {
-                "role": "user",
-                "parts": user_parts
-            }
-        ],
+        "contents": contents,
         "generationConfig": {
             "temperature": temperature
         }
@@ -92,25 +143,25 @@ pub async fn generate_multimodal(
     
     if parts.is_array() {
         let mut text_acc = String::new();
-        let mut function_call: Option<&serde_json::Value> = None;
+        let mut function_calls = Vec::new();
 
         for part in parts.as_array().unwrap() {
             if let Some(text) = part["text"].as_str() {
                 text_acc.push_str(text);
             }
-            if part.get("functionCall").is_some() {
-                function_call = Some(&part["functionCall"]);
-                break; // Gemini usually sends one function call at the end of parts
+            if let Some(call) = part.get("functionCall") {
+                function_calls.push(call);
             }
         }
 
-        if let Some(call) = function_call {
+        // If there are function calls, translate to our ReAct JSON for the loop to handle
+        if !function_calls.is_empty() {
+            let call = function_calls[0]; // Currently Tellar handles one at a time
             let name = call["name"].as_str().unwrap_or("unknown");
             let args = call["args"].clone();
             
-            // Translate native call to our internal JSON ReAct format
             let react_json = json!({
-                "thought": if text_acc.is_empty() { "Natural function call triggered." } else { text_acc.trim() },
+                "thought": if text_acc.is_empty() { "Tool call triggered." } else { text_acc.trim() },
                 "tool": name,
                 "args": args
             });
