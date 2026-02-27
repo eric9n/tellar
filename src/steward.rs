@@ -391,26 +391,37 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
     let mut image_parts = extract_and_load_images(full_context, base_path);
     user_parts.append(&mut image_parts);
     
+    let tools = get_tool_definitions(base_path);
+    
     let result = llm::generate_multimodal(
         &full_prompt,
-        user_parts,
+        user_parts.clone(),
         &config.gemini.api_key,
         &config.gemini.model,
         0.7,
-        None
+        Some(serde_json::json!([{ "functionDeclarations": tools }]))
     ).await?;
 
-    // Parse structured JSON to prevent leaks in conversational mode
+    // Parse structured JSON to handle both finish messages AND tool calls in chat
     if let Some(json_val) = parse_llm_json(&result) {
         if let Some(finish_msg) = json_val["finish"].as_str() {
             println!("✅ Conversational reply extracted from JSON finish.");
             return Ok(finish_msg.to_string());
         }
-        if let Some(thought) = json_val["thought"].as_str() {
-             println!("🧠 LLM Thought (Filtered): {}", thought);
-             // If there's only a thought and no finish, we might want a fallback, 
-             // but usually finish is present. If only thought, we could return it or a placeholder.
-             // For now, if JSON is present but no finish, we'll fall back to raw if it looks sane.
+
+        if let Some(tool_name) = json_val["tool"].as_str() {
+            let thought = json_val["thought"].as_str().unwrap_or("Thinking about your request...");
+            println!("💬 Thought (Chat): {}", thought);
+            
+            let default_args = serde_json::json!({});
+            let args = json_val.get("args").unwrap_or(&default_args);
+            println!("🛠️  Executing tool from Chat: `{}`", tool_name);
+            
+            let observation = dispatch_tool(tool_name, args, base_path, config).await;
+            
+            // For now, in chat we do a single turn. If it called a tool, we return the observation.
+            // Future refinement: Multi-turn ReAct loop in chat.
+            return Ok(format!("{}\n\n**Observation:**\n{}", thought, observation));
         }
     }
 
