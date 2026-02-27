@@ -68,7 +68,7 @@ async fn run_setup(guild_path: &Path) -> Result<()> {
     // Extract guild structure from embedded assets
     if let Some(guild_dir) = ASSETS.get_dir("guild") {
         println!("📦 Extracting workspace assets...");
-        guild_dir.extract(guild_path).context("Failed to extract guild assets")?;
+        extract_dir_contents(guild_dir, guild_path).context("Failed to extract guild contents")?;
     }
 
     // 2. Interactive Configuration
@@ -180,4 +180,23 @@ fn run_logs() -> Result<()> {
 
 fn run_cmd(cmd: &str, args: &[&str]) {
     let _ = Command::new(cmd).args(args).status();
+}
+
+fn extract_dir_contents(dir: &Dir, target: &Path) -> Result<()> {
+    for entry in dir.entries() {
+        match entry {
+            include_dir::DirEntry::Dir(d) => {
+                let name = Path::new(d.path()).file_name().context("Invalid dir name in assets")?;
+                let new_target = target.join(name);
+                fs::create_dir_all(&new_target)?;
+                extract_dir_contents(d, &new_target)?;
+            }
+            include_dir::DirEntry::File(f) => {
+                let name = Path::new(f.path()).file_name().context("Invalid file name in assets")?;
+                let target_file = target.join(name);
+                fs::write(target_file, f.contents())?;
+            }
+        }
+    }
+    Ok(())
 }
