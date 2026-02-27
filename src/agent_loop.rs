@@ -21,7 +21,7 @@ pub async fn run_agent_loop(
     path: &Path,
     base_path: &Path,
     config: &Config,
-    _channel_id: &str,
+    channel_id: &str,
     system_prompt: &str,
 ) -> anyhow::Result<String> {
     let tools = get_tool_definitions(base_path, config);
@@ -71,8 +71,16 @@ pub async fn run_agent_loop(
                     role: llm::MessageRole::Assistant,
                     parts: assistant_parts,
                 });
-                execute_tool_batch(&mut messages, &calls, path, base_path, config, &mut batch_state)
-                    .await?;
+                execute_tool_batch(
+                    &mut messages,
+                    &calls,
+                    path,
+                    base_path,
+                    config,
+                    channel_id,
+                    &mut batch_state,
+                )
+                .await?;
             }
         }
     }
@@ -86,6 +94,7 @@ pub(crate) async fn execute_tool_batch(
     path: &Path,
     base_path: &Path,
     config: &Config,
+    channel_id: &str,
     batch_state: &mut ToolBatchState,
 ) -> anyhow::Result<()> {
     // Read-only tools can batch within a turn; state-mutating tools must force a new turn.
@@ -114,7 +123,7 @@ pub(crate) async fn execute_tool_batch(
         }
 
         println!("🛠️ Action: `{}`", call.name);
-        let observation = dispatch_tool(&call.name, &call.args, base_path, config).await;
+        let observation = dispatch_tool(&call.name, &call.args, base_path, config, channel_id).await;
         println!("👁️ Observation: [{} characters]", observation.output.len());
         push_tool_result_message(messages, call, &observation);
 
@@ -262,6 +271,7 @@ mod tests {
             &blackboard,
             dir.path(),
             &test_config(),
+            "0",
             &mut ToolBatchState::default(),
         )
         .await
@@ -304,6 +314,7 @@ mod tests {
             &blackboard,
             dir.path(),
             &test_config(),
+            "0",
             &mut batch_state,
         )
         .await
@@ -361,6 +372,7 @@ mod tests {
             &blackboard,
             dir.path(),
             &test_config(),
+            "0",
             &mut ToolBatchState::default(),
         )
         .await

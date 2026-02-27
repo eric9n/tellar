@@ -133,7 +133,7 @@ async fn test_privileged_request_with_exec_disabled_settles_without_search_loop(
         llm::Message {
             role: llm::MessageRole::User,
             parts: vec![llm::MultimodalPart::text(
-                "### Execution Boundary\nThis request targets a host path. Call `exec` first; it will reject immediately because privileged mode is disabled, then explain the limitation instead of searching with guild file tools.\nYou cannot send file attachments directly. If this request depends on unsupported capabilities, say so directly and finish instead of continuing to search.",
+                "### Execution Boundary\nThis request targets a host path. Call `exec` first; it will reject immediately because privileged mode is disabled, then explain the limitation instead of searching with guild file tools.\nThe user explicitly wants a file attachment. If you obtain a local file path, use `send_attachment` to deliver it to the current Discord channel. Do not paste the full file contents as a substitute unless the user changes the request.\nIf this request depends on unsupported capabilities, say so directly and finish instead of continuing to search.",
             )],
         },
     ];

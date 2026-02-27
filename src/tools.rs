@@ -5,6 +5,7 @@
  */
 
 use crate::config::Config;
+use crate::delivery;
 use crate::llm;
 use crate::skills::{self, SkillMetadata};
 use serde_json::{json, Value};
@@ -34,7 +35,7 @@ impl ToolExecutionResult {
     }
 }
 
-pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit", "exec"];
+pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit"];
 
 #[derive(Default)]
 pub(crate) struct ToolBatchState {
@@ -49,7 +50,7 @@ pub(crate) fn is_read_only_tool(name: &str) -> bool {
 }
 
 pub(crate) fn is_write_tool(name: &str) -> bool {
-    matches!(name, "write" | "edit")
+    matches!(name, "write" | "edit") || delivery::DELIVERY_TOOL_NAMES.contains(&name)
 }
 
 pub(crate) fn tool_call_signature(call: &llm::ToolCallRequest) -> String {
@@ -523,6 +524,7 @@ pub(crate) async fn dispatch_tool(
     args: &Value,
     base_path: &Path,
     config: &Config,
+    channel_id: &str,
 ) -> ToolExecutionResult {
     let output = match name {
         "ls" => run_ls_tool(args, base_path),
@@ -631,18 +633,28 @@ pub(crate) async fn dispatch_tool(
         }
         "exec" => run_exec_tool(args, base_path, config).await,
         _ => {
-            let skills = SkillMetadata::discover_skills(base_path);
-            let mut skill_out = ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name));
-            for (meta, dir) in skills {
-                if let Some(tool) = meta.tools.get(name) {
-                    skill_out = match skills::execute_skill_tool(tool, &dir, base_path, args, config).await {
-                        Ok(out) => ToolExecutionResult::success(out),
-                        Err(e) => ToolExecutionResult::error(format!("Error executing skill tool `{}`: {}", name, e)),
-                    };
-                    break;
+            if let Some(delivery_out) =
+                delivery::dispatch_delivery_tool(name, args, base_path, config, channel_id).await
+            {
+                delivery_out
+            } else {
+                let skills = SkillMetadata::discover_skills(base_path);
+                let mut skill_out = ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name));
+                for (meta, dir) in skills {
+                    if let Some(tool) = meta.tools.get(name) {
+                        skill_out =
+                            match skills::execute_skill_tool(tool, &dir, base_path, args, config).await {
+                                Ok(out) => ToolExecutionResult::success(out),
+                                Err(e) => ToolExecutionResult::error(format!(
+                                    "Error executing skill tool `{}`: {}",
+                                    name, e
+                                )),
+                            };
+                        break;
+                    }
                 }
+                skill_out
             }
-            skill_out
         }
     };
 
@@ -685,6 +697,10 @@ fn truncate_output(output: String, limit: usize) -> String {
 pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value {
     let mut tools = json!(core_tool_definitions());
 
+    for tool in delivery::delivery_tool_definitions() {
+        tools.as_array_mut().unwrap().push(tool);
+    }
+
     let discovered = SkillMetadata::discover_skills(base_path);
     for (meta, _) in discovered {
         for (tool_name, tool_info) in meta.tools {
@@ -722,7 +738,8 @@ mod tests {
     #[tokio::test]
     async fn test_exec_tool_rejects_when_privileged_mode_is_disabled() {
         let dir = tempdir().unwrap();
-        let result = dispatch_tool("exec", &json!({ "command": "pwd" }), dir.path(), &test_config()).await;
+        let result =
+            dispatch_tool("exec", &json!({ "command": "pwd" }), dir.path(), &test_config(), "0").await;
 
         assert!(result.is_error);
         assert!(result.output.contains("runtime.privileged=false"));
@@ -734,7 +751,7 @@ mod tests {
         let mut config = test_config();
         config.runtime.privileged = true;
         let result =
-            dispatch_tool("exec", &json!({ "command": "printf host-ok" }), dir.path(), &config).await;
+            dispatch_tool("exec", &json!({ "command": "printf host-ok" }), dir.path(), &config, "0").await;
 
         assert!(!result.is_error);
         assert_eq!(result.output, "host-ok");
@@ -743,7 +760,8 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_tool_rejects_missing_write_content() {
         let dir = tempdir().unwrap();
-        let result = dispatch_tool("write", &json!({ "path": "notes.txt" }), dir.path(), &test_config()).await;
+        let result =
+            dispatch_tool("write", &json!({ "path": "notes.txt" }), dir.path(), &test_config(), "0").await;
 
         assert!(result.is_error);
         assert!(result.output.contains("Missing required argument `content`"));

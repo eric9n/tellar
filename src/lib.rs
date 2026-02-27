@@ -7,6 +7,7 @@
 pub mod config;
 pub mod context;
 pub mod agent_loop;
+pub mod delivery;
 pub mod llm;
 pub mod session;
 pub mod steward;

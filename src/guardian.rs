@@ -151,6 +151,7 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
                     &guardian_blackboard,
                     base_path,
                     config,
+                    "0",
                     &mut batch_state,
                 )
                 .await?;

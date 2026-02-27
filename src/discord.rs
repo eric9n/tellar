@@ -441,6 +441,49 @@ use once_cell::sync::Lazy;
 
 static HTTP_CHANNEL_CLIENT: Lazy<Arc<RwLock<Option<(String, Arc<serenity::http::Http>)>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
+fn split_message_chunks(content: &str, max_length: usize) -> Vec<String> {
+    if max_length == 0 || content.is_empty() {
+        return Vec::new();
+    }
+
+    let mut remaining = content;
+    let mut chunks = Vec::new();
+
+    while !remaining.is_empty() {
+        let char_count = remaining.chars().count();
+        if char_count <= max_length {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let mut boundary = remaining.len();
+        for (count, (idx, _)) in remaining.char_indices().enumerate() {
+            if count == max_length {
+                boundary = idx;
+                break;
+            }
+        }
+
+        let candidate = &remaining[..boundary];
+        let split_at = candidate
+            .rfind('\n')
+            .filter(|idx| *idx >= boundary / 3)
+            .map(|idx| idx + 1)
+            .unwrap_or(boundary);
+
+        let chunk = remaining[..split_at].trim_end_matches('\n').to_string();
+        if chunk.is_empty() {
+            chunks.push(candidate.to_string());
+            remaining = &remaining[boundary..];
+        } else {
+            chunks.push(chunk);
+            remaining = remaining[split_at..].trim_start_matches('\n');
+        }
+    }
+
+    chunks
+}
+
 /// Helper to get or create the shared Http client
 async fn get_http_client(token: &str) -> Arc<serenity::http::Http> {
 
@@ -471,28 +514,92 @@ pub async fn send_bot_message(token: &str, channel_id: &str, content: &str) -> a
     let c_id = channel_id.parse::<u64>()
         .map_err(|_| anyhow::anyhow!("Invalid channel ID: {}", channel_id))?;
 
-    // ✂️ Automatic Chunking: Split content into parts of max 1900 chars
+    // ✂️ Automatic chunking: prefer newline boundaries before hard character cuts.
     let max_length = 1900;
     let mut last_msg = None;
-
-    if content.len() <= max_length {
-        let map = serde_json::json!({ "content": content });
-        last_msg = Some(http.send_message(c_id.into(), vec![], &map).await?);
-    } else {
+    let chunks = split_message_chunks(content, max_length);
+    if chunks.len() > 1 {
         println!("✂️ Content length {} exceeds Discord limit, chunking...", content.len());
-        let mut full_content = content.to_string();
-        while !full_content.is_empty() {
-            let chunk: String = full_content.chars().take(max_length).collect();
-            full_content = full_content.chars().skip(max_length).collect();
-            
-            let map = serde_json::json!({ "content": chunk });
-            last_msg = Some(http.send_message(c_id.into(), vec![], &map).await?);
-            // Small delay between chunks to avoid rate limit issues
+    }
+
+    for chunk in chunks {
+        let map = serde_json::json!({ "content": chunk });
+        last_msg = Some(http.send_message(c_id.into(), vec![], &map).await?);
+        if last_msg.is_some() {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
 
     last_msg.ok_or_else(|| anyhow::anyhow!("Failed to send any message chunks"))
+}
+
+/// Send a reply to a specific Discord message in the current channel.
+pub async fn send_reply_message(
+    token: &str,
+    channel_id: &str,
+    message_id: &str,
+    content: &str,
+) -> anyhow::Result<serenity::model::channel::Message> {
+    if token.is_empty() {
+        return Err(anyhow::anyhow!("Discord token is empty"));
+    }
+    if channel_id.is_empty() || channel_id == "0" {
+        return Err(anyhow::anyhow!("Invalid channel ID: {}", channel_id));
+    }
+    if message_id.is_empty() {
+        return Err(anyhow::anyhow!("Invalid message ID"));
+    }
+
+    let http = get_http_client(token).await;
+    let c_id = channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Invalid channel ID: {}", channel_id))?;
+    let m_id = message_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Invalid message ID: {}", message_id))?;
+
+    let map = serde_json::json!({
+        "content": content,
+        "message_reference": { "message_id": m_id.to_string() },
+        "allowed_mentions": { "replied_user": false }
+    });
+    let msg = http.send_message(c_id.into(), vec![], &map).await?;
+    Ok(msg)
+}
+
+/// Send a simple rich embed to Discord.
+pub async fn send_embed_message(
+    token: &str,
+    channel_id: &str,
+    title: &str,
+    description: &str,
+    color: Option<u32>,
+) -> anyhow::Result<serenity::model::channel::Message> {
+    if token.is_empty() {
+        return Err(anyhow::anyhow!("Discord token is empty"));
+    }
+    if channel_id.is_empty() || channel_id == "0" {
+        return Err(anyhow::anyhow!("Invalid channel ID: {}", channel_id));
+    }
+
+    let http = get_http_client(token).await;
+    let c_id = channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Invalid channel ID: {}", channel_id))?;
+
+    let mut embed = serde_json::json!({
+        "title": title,
+        "description": description,
+    });
+    if let Some(color) = color {
+        embed["color"] = serde_json::json!(color);
+    }
+
+    let map = serde_json::json!({
+        "embeds": [embed]
+    });
+    let msg = http.send_message(c_id.into(), vec![], &map).await?;
+    Ok(msg)
 }
 
 /// Send a local file as an attachment to Discord
@@ -531,6 +638,27 @@ pub async fn broadcast_typing(token: &str, channel_id: &str) -> anyhow::Result<(
     
     http.broadcast_typing(c_id.into()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_message_chunks;
+
+    #[test]
+    fn test_split_message_chunks_prefers_newline_boundaries() {
+        let content = "line one\nline two\nline three";
+        let chunks = split_message_chunks(content, 12);
+
+        assert_eq!(chunks, vec!["line one", "line two", "line three"]);
+    }
+
+    #[test]
+    fn test_split_message_chunks_falls_back_to_hard_cut_without_newlines() {
+        let content = "abcdefghijklmnopqrstuvwxyz";
+        let chunks = split_message_chunks(content, 10);
+
+        assert_eq!(chunks, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
 }
 
 

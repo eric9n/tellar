@@ -54,6 +54,21 @@ The runtime is intentionally split into narrow modules instead of one monolithic
 
 Everything outside local cognition should be modeled as a **Skill**. Core tools inspect and modify durable workspace state; skills handle domain-specific or external capabilities and should preferably write their results back into the guild filesystem.
 
+### Discord Delivery Tools
+
+Tellar also exposes a dedicated Discord delivery layer for returning artifacts back to the active channel:
+
+- **`send_message`**: Send plain text, with automatic newline-aware chunking for long output.
+- **`send_reply`**: Reply to a specific Discord message ID.
+- **`send_embed`**: Send a simple rich embed with title, description, and optional color.
+- **`send_attachment`**: Send one local file as an attachment.
+- **`send_attachments`**: Send multiple local files as separate attachments.
+- **`send_image`**: Send an image file with image-focused delivery semantics.
+- **`send_code_block`**: Send formatted code or logs in a fenced block.
+- **`send_text_file`**: Materialize large text into a file and send it as an attachment.
+
+This keeps execution and delivery separate: `exec` or the local cognition tools produce results, while delivery tools decide how those results are sent back to Discord.
+
 ### Runtime Guardrails
 
 Tellar uses native tool calling with a few explicit runtime constraints to keep long-running guild automation predictable:

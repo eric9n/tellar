@@ -32,7 +32,7 @@ fn unsupported_request_note(text: &str, config: &Config) -> Option<String> {
     }
     if wants_attachment {
         constraints.push(
-            "You cannot send file attachments directly. If the user needs a file, write it inside the guild workspace or explain that attachment delivery is unavailable.".to_string(),
+            "The user explicitly wants a file attachment. If you obtain a local file path, use `send_attachment` to deliver it to the current Discord channel. Do not paste the full file contents as a substitute unless the user changes the request.".to_string(),
         );
     }
 
@@ -247,7 +247,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(note.contains("cannot send file attachments"));
+        assert!(note.contains("send_attachment"));
+        assert!(note.contains("Do not paste the full file contents"));
     }
 
     #[test]
