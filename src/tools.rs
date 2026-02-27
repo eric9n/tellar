@@ -34,7 +34,6 @@ impl ToolExecutionResult {
 }
 
 pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit"];
-pub(crate) const READ_ONLY_TOOL_BUDGET: usize = 4;
 
 #[derive(Default)]
 pub(crate) struct ToolBatchState {
@@ -565,7 +564,7 @@ pub(crate) async fn dispatch_tool(
             let mut skill_out = ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name));
             for (meta, dir) in skills {
                 if let Some(tool) = meta.tools.get(name) {
-                    skill_out = match skills::execute_skill_tool(&tool.shell, &dir, base_path, args, config).await {
+                    skill_out = match skills::execute_skill_tool(tool, &dir, base_path, args, config).await {
                         Ok(out) => ToolExecutionResult::success(out),
                         Err(e) => ToolExecutionResult::error(format!("Error executing skill tool `{}`: {}", name, e)),
                     };
@@ -577,20 +576,23 @@ pub(crate) async fn dispatch_tool(
     };
 
     ToolExecutionResult {
-        output: truncate_output(output.output),
+        output: truncate_output(output.output, config.runtime.max_tool_output_bytes),
         is_error: output.is_error,
     }
 }
 
-fn truncate_output(output: String) -> String {
-    let limit = 5000;
+fn truncate_output(output: String, limit: usize) -> String {
+    if limit == 0 {
+        return output;
+    }
+
     if output.len() > limit {
-        let mut prefix_end = 2500;
+        let mut prefix_end = limit / 2;
         while prefix_end > 0 && !output.is_char_boundary(prefix_end) {
             prefix_end -= 1;
         }
 
-        let mut suffix_start = output.len() - 2500;
+        let mut suffix_start = output.len().saturating_sub(limit / 2);
         while suffix_start < output.len() && !output.is_char_boundary(suffix_start) {
             suffix_start += 1;
         }
@@ -641,6 +643,7 @@ mod tests {
                 guild_id: None,
                 channel_mappings: None,
             },
+            runtime: crate::config::RuntimeConfig::default(),
             guardian: None,
         }
     }

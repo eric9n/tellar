@@ -8,18 +8,12 @@ use crate::config::Config;
 use crate::context::update_history_with_steering;
 use crate::llm;
 use crate::tools::{
-    READ_ONLY_TOOL_BUDGET, ToolBatchState, ToolExecutionResult, dispatch_tool, get_tool_definitions,
-    is_read_only_tool, is_write_tool, push_system_note, push_tool_result_message,
-    skip_remaining_tool_calls, tool_call_signature, tool_observation_signature,
+    ToolBatchState, ToolExecutionResult, dispatch_tool, get_tool_definitions, is_read_only_tool,
+    is_write_tool, push_system_note, push_tool_result_message, skip_remaining_tool_calls,
+    tool_call_signature, tool_observation_signature,
 };
 use serde_json::json;
 use std::path::Path;
-
-// Final safety fuse. Normal convergence should happen earlier via:
-// - read-only budget
-// - write-after-reevaluate policy
-// - repeated-call / repeated-error / no-new-info cutoffs
-const DEFAULT_MAX_TURNS: usize = 16;
 
 /// The core agent loop for native tool-calling turns.
 pub(crate) async fn run_agent_loop(
@@ -32,7 +26,7 @@ pub(crate) async fn run_agent_loop(
 ) -> anyhow::Result<String> {
     let tools = get_tool_definitions(base_path);
     let mut messages = initial_messages;
-    let max_turns = DEFAULT_MAX_TURNS;
+    let max_turns = config.runtime.max_turns.max(1);
     let mut turn = 0;
     let mut batch_state = ToolBatchState::default();
 
@@ -95,6 +89,7 @@ pub(crate) async fn execute_tool_batch(
     batch_state: &mut ToolBatchState,
 ) -> anyhow::Result<()> {
     // Read-only tools can batch within a turn; state-mutating tools must force a new turn.
+    let read_only_budget = config.runtime.read_only_budget.max(1);
     let mut read_only_calls = 0;
     let mut stop_reason: Option<String> = None;
 
@@ -145,10 +140,10 @@ pub(crate) async fn execute_tool_batch(
 
         if is_read_only_tool(&call.name) {
             read_only_calls += 1;
-            if read_only_calls >= READ_ONLY_TOOL_BUDGET {
+            if read_only_calls >= read_only_budget {
                 stop_reason = Some(format!(
                     "Read-only budget reached ({} calls). Reevaluate before continuing.",
-                    READ_ONLY_TOOL_BUDGET
+                    read_only_budget
                 ));
                 skip_remaining_tool_calls(
                     messages,
@@ -237,6 +232,7 @@ mod tests {
                 guild_id: None,
                 channel_mappings: None,
             },
+            runtime: crate::config::RuntimeConfig::default(),
             guardian: None,
         }
     }

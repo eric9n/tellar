@@ -30,6 +30,17 @@ type JobMap = Arc<RwLock<HashMap<PathBuf, Uuid>>>;
 static SCHEDULER: Lazy<Arc<RwLock<Option<JobScheduler>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
 static JOB_MAP: Lazy<JobMap> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+fn is_stream_log_name(file_name: &str) -> bool {
+    regex::Regex::new(r"^\d{4}-\d{2}-\d{2}\.md$")
+        .unwrap()
+        .is_match(file_name)
+}
+
+fn should_ignore_rhythm_file(path: &Path) -> bool {
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    file_name == "KNOWLEDGE.md" || is_stream_log_name(file_name)
+}
+
 pub async fn run_rhythm(base_path: &Path) -> anyhow::Result<()> {
     let sched = JobScheduler::new().await?;
     {
@@ -63,7 +74,7 @@ pub async fn sync_job_from_file(path: &PathBuf) -> anyhow::Result<()> {
     };
 
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name == "KNOWLEDGE.md" || regex::Regex::new(r"^\d{4}-\d{2}-\d{2}\.md$").unwrap().is_match(file_name) {
+    if should_ignore_rhythm_file(path) {
         return Ok(());
     }
 
@@ -162,16 +173,43 @@ fn collect_thread_files(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
         if path.is_dir() {
             collect_thread_files(&path, paths)?;
         } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            if file_name == "KNOWLEDGE.md" { continue; }
-            let re_stream = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}\.md$").unwrap();
-            if re_stream.is_match(file_name) { continue; }
+            if should_ignore_rhythm_file(&path) { continue; }
             paths.push(path);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_should_ignore_rhythm_file_matches_knowledge_and_stream_logs() {
+        assert!(should_ignore_rhythm_file(Path::new("/tmp/rituals/KNOWLEDGE.md")));
+        assert!(should_ignore_rhythm_file(Path::new("/tmp/rituals/2026-02-27.md")));
+        assert!(!should_ignore_rhythm_file(Path::new("/tmp/rituals/deploy.md")));
+    }
+
+    #[test]
+    fn test_collect_thread_files_skips_knowledge_logs_and_history() {
+        let dir = tempdir().unwrap();
+        let rituals = dir.path().join("rituals");
+        fs::create_dir_all(rituals.join("history")).unwrap();
+        fs::write(rituals.join("KNOWLEDGE.md"), "").unwrap();
+        fs::write(rituals.join("2026-02-27.md"), "").unwrap();
+        fs::write(rituals.join("deploy.md"), "").unwrap();
+        fs::write(rituals.join("history").join("old.md"), "").unwrap();
+
+        let mut paths = Vec::new();
+        collect_thread_files(&rituals, &mut paths).unwrap();
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].file_name().and_then(|s| s.to_str()), Some("deploy.md"));
+    }
 }

@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tellar::config::{Config, DiscordConfig, GeminiConfig};
+use tellar::config::{Config, DiscordConfig, GeminiConfig, RuntimeConfig};
 
 static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets");
 
@@ -122,6 +122,7 @@ fn load_or_default_config(path: &Path) -> Result<Config> {
                 guild_id: None,
                 channel_mappings: None,
             },
+            runtime: RuntimeConfig::default(),
             guardian: None,
         }),
     }

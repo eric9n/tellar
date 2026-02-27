@@ -32,6 +32,7 @@ async fn test_full_agent_turn_with_gemini_3() {
             guild_id: None,
             channel_mappings: None,
         },
+        runtime: tellar::config::RuntimeConfig::default(),
         guardian: None,
     };
 

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use serde_json::Value;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SkillMetadata {
@@ -23,6 +24,8 @@ pub struct SkillTool {
     pub shell: String, // The command or script to run
     pub parameters: Value,
 }
+
+const DEFAULT_SKILL_TIMEOUT_SECS: u64 = 60;
 
 impl SkillMetadata {
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -78,12 +81,13 @@ impl SkillMetadata {
 }
 
 pub async fn execute_skill_tool(
-    script_line: &str,
+    tool: &SkillTool,
     skill_dir: &Path,
     workspace_dir: &Path,
     args: &Value,
     config: &crate::config::Config,
 ) -> Result<String> {
+    let script_line = &tool.shell;
     let parts: Vec<String> = script_line.split_whitespace().map(|s| s.to_string()).collect();
     if parts.is_empty() {
         return Err(anyhow!("Empty execution line in skill tool"));
@@ -111,16 +115,26 @@ pub async fn execute_skill_tool(
 
     let args_json = serde_json::to_string(args)?;
 
-    let output = cmd
+    let output_future = cmd
         .env("TELLAR_ARGS", &args_json)
         .env("SKILL_DIR", skill_dir)
         .env("TELLAR_WORKSPACE", workspace_dir)
-        .env("TELLAR_CORE_TOOLS", "ls,grep,read,write,edit")
+        .env("TELLAR_CORE_TOOLS", "ls,find,grep,read,write,edit")
         .env("GEMINI_API_KEY", &config.gemini.api_key)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
+        .output();
+
+    let timeout_secs = DEFAULT_SKILL_TIMEOUT_SECS;
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), output_future)
         .await
+        .map_err(|_| {
+            anyhow!(
+                "Skill tool timed out after {}s: `{}`",
+                timeout_secs,
+                parts[0]
+            )
+        })?
         .map_err(|e| anyhow!("Failed to execute skill tool `{}`: {}", parts[0], e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -143,4 +157,37 @@ pub async fn execute_skill_tool(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_skill_metadata_parses_minimal_tool_schema() {
+        let dir = tempdir().unwrap();
+        let skill_md = dir.path().join("SKILL.md");
+        fs::write(
+            &skill_md,
+            r#"---
+name: sample
+tools:
+  demo:
+    description: Demo tool
+    shell: demo.sh
+    parameters:
+      type: object
+---
+Body
+"#,
+        )
+        .unwrap();
+
+        let meta = SkillMetadata::from_file(&skill_md).unwrap();
+        let tool = meta.tools.get("demo").unwrap();
+        assert_eq!(tool.description, "Demo tool");
+        assert_eq!(tool.shell, "demo.sh");
+        assert_eq!(tool.parameters["type"], "object");
+    }
 }

@@ -6,5 +6,10 @@ discord:
   token: "YOUR_DISCORD_BOT_TOKEN"
 
 guardian:
-  # model: "gemini-2.0-flash" # Optional: Different model for the Guardian
+  # Optional. If omitted, Guardian falls back to gemini.model.
+  model: "gemini-2.5-flash"
 
+runtime:
+  max_turns: 16
+  read_only_budget: 4
+  max_tool_output_bytes: 5000

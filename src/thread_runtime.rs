@@ -16,12 +16,47 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
 static EXECUTING_FILES: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static CONCURRENCY_LIMITER: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(5)));
+
+fn append_task_result_log(
+    content: &str,
+    task_line: &str,
+    result: &str,
+    timestamp: &str,
+) -> (String, bool) {
+    if !result.starts_with("Error executing task:") && !result.starts_with("Gemini API Error:") {
+        let updated_line = task_line.replace("[ ]", "[x]");
+        let log_entry = format!("\n> [{}] Execution result: {}", timestamp, result);
+        let mut next = content.replace(task_line, &updated_line);
+        next.push_str(&log_entry);
+        (next, true)
+    } else {
+        let log_entry = format!("\n> [{}] ❌ Task failed: {}", timestamp, result);
+        let mut next = content.to_string();
+        next.push_str(&log_entry);
+        (next, false)
+    }
+}
+
+fn should_archive_thread(content: &str, schedule: Option<&str>) -> bool {
+    let schedule_value = schedule.unwrap_or("").trim();
+    if !schedule_value.is_empty() {
+        return false;
+    }
+
+    let re_any_todo = Regex::new(r"- \[ \]").unwrap();
+    !re_any_todo.is_match(content)
+}
+
+fn history_destination(parent: &Path, file_name: &OsStr, date: &str) -> PathBuf {
+    parent.join("history").join(date).join(file_name)
+}
 
 pub async fn execute_thread_file(
     path: &PathBuf,
@@ -120,15 +155,12 @@ async fn execute_thread_file_internal(
                 }
             };
 
-            if !result.starts_with("Error executing task:")
-                && !result.starts_with("Gemini API Error:")
-            {
-                let updated_line = task_line.replace("[ ]", "[x]");
-                let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-                let log_entry = format!("\n> [{}] Execution result: {}", timestamp, result);
+            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let (next_content, completed) =
+                append_task_result_log(&content, task_line, &result, &timestamp);
+            content = next_content;
 
-                content = content.replace(task_line, &updated_line);
-                content.push_str(&log_entry);
+            if completed {
                 fs::write(path, &content)?;
 
                 let sanitized_result = mask_sensitive_data(&result, config);
@@ -145,9 +177,6 @@ async fn execute_thread_file_internal(
                     );
                 }
             } else {
-                let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-                let log_entry = format!("\n> [{}] ❌ Task failed: {}", timestamp, result);
-                content.push_str(&log_entry);
                 fs::write(path, &content)?;
                 break;
             }
@@ -219,30 +248,27 @@ async fn execute_thread_file_internal(
     }
 
     if let Some(header) = header_owned {
-        if header.schedule.is_none() || header.schedule.as_ref().unwrap().is_empty() {
-            let re_any_todo = Regex::new(r"- \[ \]").unwrap();
-            if !re_any_todo.is_match(&content) {
-                if let Some(parent) = path.parent() {
-                    let today = Local::now().format("%Y-%m-%d").to_string();
-                    let history_dir = parent.join("history").join(&today);
-                    let _ = fs::create_dir_all(&history_dir);
+        if should_archive_thread(&content, header.schedule.as_deref()) {
+            if let Some(parent) = path.parent() {
+                let today = Local::now().format("%Y-%m-%d").to_string();
+                let history_dir = parent.join("history").join(&today);
+                let _ = fs::create_dir_all(&history_dir);
 
-                    if let Some(file_name) = path.file_name() {
-                        let dest_path = history_dir.join(file_name);
-                        if let Err(e) = fs::rename(path, &dest_path) {
-                            eprintln!("⚠️ Failed to archive thread: {:?}", e);
-                        } else {
-                            println!("📦 Thread archived to history/{}", today);
-                            let _ = discord::send_bot_message(
-                                &config.discord.token,
-                                &channel_id,
-                                &format!(
-                                    "📦 Thread **#{}** has been archived to history/{}",
-                                    thread_id, today
-                                ),
-                            )
-                            .await;
-                        }
+                if let Some(file_name) = path.file_name() {
+                    let dest_path = history_destination(parent, file_name, &today);
+                    if let Err(e) = fs::rename(path, &dest_path) {
+                        eprintln!("⚠️ Failed to archive thread: {:?}", e);
+                    } else {
+                        println!("📦 Thread archived to history/{}", today);
+                        let _ = discord::send_bot_message(
+                            &config.discord.token,
+                            &channel_id,
+                            &format!(
+                                "📦 Thread **#{}** has been archived to history/{}",
+                                thread_id, today
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
@@ -250,4 +276,54 @@ async fn execute_thread_file_internal(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_append_task_result_log_marks_completed_task() {
+        let content = "---\nstatus: open\n---\n- [ ] Ship release";
+        let (updated, completed) = append_task_result_log(
+            content,
+            "- [ ] Ship release",
+            "Release shipped successfully",
+            "2026-02-27 12:00:00",
+        );
+
+        assert!(completed);
+        assert!(updated.contains("- [x] Ship release"));
+        assert!(updated.contains("Execution result: Release shipped successfully"));
+    }
+
+    #[test]
+    fn test_append_task_result_log_keeps_failed_task_open() {
+        let content = "---\nstatus: open\n---\n- [ ] Ship release";
+        let (updated, completed) = append_task_result_log(
+            content,
+            "- [ ] Ship release",
+            "Error executing task: network failed",
+            "2026-02-27 12:00:00",
+        );
+
+        assert!(!completed);
+        assert!(updated.contains("- [ ] Ship release"));
+        assert!(updated.contains("❌ Task failed: Error executing task: network failed"));
+    }
+
+    #[test]
+    fn test_should_archive_thread_requires_no_schedule_and_no_open_todos() {
+        assert!(should_archive_thread("---\nstatus: done\n---\n- [x] Finished", None));
+        assert!(!should_archive_thread("---\nstatus: done\n---\n- [ ] Pending", None));
+        assert!(!should_archive_thread("---\nstatus: done\n---\n- [x] Finished", Some("0 * * * *")));
+    }
+
+    #[test]
+    fn test_history_destination_builds_expected_path() {
+        let parent = Path::new("/tmp/channel");
+        let dest = history_destination(parent, OsStr::new("thread.md"), "2026-02-27");
+        assert_eq!(dest, Path::new("/tmp/channel/history/2026-02-27/thread.md"));
+    }
 }

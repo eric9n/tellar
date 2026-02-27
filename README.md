@@ -90,6 +90,27 @@ tellar --guild ./my-guild
 2. **Select a Brain**: Choose from available Gemini models.
 3. **Define Identity**: Edit your Steward's personality in `agents/AGENTS.md`.
 
+### Minimal `tellar.yml`
+
+The generated config can stay small. A typical baseline looks like this:
+
+```yaml
+gemini:
+  api_key: YOUR_GEMINI_API_KEY
+  model: gemini-3-flash-preview
+discord:
+  token: YOUR_DISCORD_BOT_TOKEN
+guardian:
+  model: gemini-2.5-flash
+runtime:
+  max_turns: 16
+  read_only_budget: 4
+  max_tool_output_bytes: 5000
+```
+
+`runtime` controls the main safety and convergence limits for the native tool-calling loop.
+`guardian.model` is optional. If omitted, the Guardian falls back to the main `gemini.model`.
+
 ### Per-Channel Customization
 Tellar supports unique identities for different channels. Place `<CHANNEL_ID>.AGENTS.md` in your `agents/` directory to supplement the base instructions for specific contexts.
 

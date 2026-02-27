@@ -11,7 +11,26 @@ use anyhow::{Context, Result};
 pub struct Config {
     pub gemini: GeminiConfig,
     pub discord: DiscordConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     pub guardian: Option<GuardianConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RuntimeConfig {
+    pub max_turns: usize,
+    pub read_only_budget: usize,
+    pub max_tool_output_bytes: usize,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 16,
+            read_only_budget: 4,
+            max_tool_output_bytes: 5000,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
