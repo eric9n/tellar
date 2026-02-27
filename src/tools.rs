@@ -10,6 +10,7 @@ use crate::skills::{self, SkillMetadata};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::process::Command;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionResult {
@@ -33,7 +34,7 @@ impl ToolExecutionResult {
     }
 }
 
-pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit"];
+pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit", "exec"];
 
 #[derive(Default)]
 pub(crate) struct ToolBatchState {
@@ -431,7 +432,76 @@ fn core_tool_definitions() -> Vec<Value> {
                 "required": ["path", "oldText", "newText"]
             }
         }),
+        json!({
+            "name": "exec",
+            "description": "Run a host shell command. This is a privileged tool: when runtime.privileged=false it rejects immediately. Use this for absolute host paths, system scripts, or cross-workspace operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to execute on the host" }
+                },
+                "required": ["command"]
+            }
+        }),
     ]
+}
+
+async fn run_exec_tool(args: &Value, base_path: &Path, config: &Config) -> ToolExecutionResult {
+    let command = match args.get("command").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+        Some(value) => value,
+        None => return ToolExecutionResult::error("Error: Missing required argument `command`."),
+    };
+
+    if !config.runtime.privileged {
+        return ToolExecutionResult::error(
+            "Error: `exec` is disabled because runtime.privileged=false. Explain the limitation or enable privileged mode.",
+        );
+    }
+
+    let output = match config.runtime.exec_mode {
+        crate::config::ExecMode::Unrestricted => {
+            Command::new("sh")
+                .arg("-lc")
+                .arg(command)
+                .current_dir(base_path)
+                .env("TELLAR_WORKSPACE", base_path)
+                .output()
+                .await
+        }
+    };
+
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut combined = String::new();
+            if !stdout.trim().is_empty() {
+                combined.push_str(stdout.trim_end());
+            }
+            if !stderr.trim().is_empty() {
+                if !combined.is_empty() {
+                    combined.push_str("\n");
+                }
+                combined.push_str("[stderr]\n");
+                combined.push_str(stderr.trim_end());
+            }
+            if combined.is_empty() {
+                combined = "(no output)".to_string();
+            }
+
+            if output.status.success() {
+                ToolExecutionResult::success(combined)
+            } else {
+                let code = output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated by signal".to_string());
+                ToolExecutionResult::error(format!("Command failed ({}):\n{}", code, combined))
+            }
+        }
+        Err(e) => ToolExecutionResult::error(format!("Error executing command: {}", e)),
+    }
 }
 
 pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
@@ -559,6 +629,7 @@ pub(crate) async fn dispatch_tool(
                 Err(_e) => ToolExecutionResult::error(format!("Error: File not found: {}", rel_path)),
             }
         }
+        "exec" => run_exec_tool(args, base_path, config).await,
         _ => {
             let skills = SkillMetadata::discover_skills(base_path);
             let mut skill_out = ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name));
@@ -611,7 +682,7 @@ fn truncate_output(output: String, limit: usize) -> String {
     }
 }
 
-pub(crate) fn get_tool_definitions(base_path: &Path) -> Value {
+pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value {
     let mut tools = json!(core_tool_definitions());
 
     let discovered = SkillMetadata::discover_skills(base_path);
@@ -646,6 +717,27 @@ mod tests {
             runtime: crate::config::RuntimeConfig::default(),
             guardian: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_exec_tool_rejects_when_privileged_mode_is_disabled() {
+        let dir = tempdir().unwrap();
+        let result = dispatch_tool("exec", &json!({ "command": "pwd" }), dir.path(), &test_config()).await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("runtime.privileged=false"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_tool_runs_when_privileged_mode_is_enabled() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config();
+        config.runtime.privileged = true;
+        let result =
+            dispatch_tool("exec", &json!({ "command": "printf host-ok" }), dir.path(), &config).await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.output, "host-ok");
     }
 
     #[tokio::test]

@@ -51,7 +51,7 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
     let system_prompt = fs::read_to_string(guardian_prompt_path)
         .unwrap_or_else(|_| "You are the Guardian of the Guild. Monitor and maintain.".to_string());
 
-    let tools = get_tool_definitions(base_path);
+    let tools = get_tool_definitions(base_path, config);
 
     // 1. Gather environmental context
     let mut env_context = String::new();

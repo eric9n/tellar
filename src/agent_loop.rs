@@ -24,7 +24,7 @@ pub async fn run_agent_loop(
     _channel_id: &str,
     system_prompt: &str,
 ) -> anyhow::Result<String> {
-    let tools = get_tool_definitions(base_path);
+    let tools = get_tool_definitions(base_path, config);
     let mut messages = initial_messages;
     let max_turns = config.runtime.max_turns.max(1);
     let mut turn = 0;

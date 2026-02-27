@@ -3,9 +3,9 @@
  * File Path: src/config.rs
  * Responsibility: YAML configuration structure and loading
  */
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use anyhow::{Context, Result};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -17,10 +17,25 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub max_turns: usize,
     pub read_only_budget: usize,
     pub max_tool_output_bytes: usize,
+    pub privileged: bool,
+    pub exec_mode: ExecMode,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecMode {
+    Unrestricted,
+}
+
+impl Default for ExecMode {
+    fn default() -> Self {
+        Self::Unrestricted
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -29,6 +44,8 @@ impl Default for RuntimeConfig {
             max_turns: 16,
             read_only_budget: 4,
             max_tool_output_bytes: 5000,
+            privileged: false,
+            exec_mode: ExecMode::Unrestricted,
         }
     }
 }
