@@ -19,6 +19,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 use tokio::sync::Semaphore;
 use base64::{Engine as _, engine::general_purpose};
 
@@ -549,19 +550,22 @@ pub(crate) async fn dispatch_tool(name: &str, args: &Value, base_path: &Path, co
         "sh" => {
             let cmd_str = args["command"].as_str().unwrap_or("");
             if cmd_str.is_empty() { "Error: No command provided".into() } else {
-                let res = Command::new("sh")
+                let child = Command::new("sh")
                     .current_dir(base_path) // Enforce guild-scoped execution
                     .arg("-c")
                     .arg(cmd_str)
-                    .output()
-                    .await;
-                match res {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                        format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr)
+                    .output();
+                
+                match timeout(Duration::from_secs(30), child).await {
+                    Ok(res) => match res {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr)
+                        },
+                        Err(e) => format!("Error executing sh: {}", e),
                     },
-                    Err(e) => format!("Error executing sh: {}", e),
+                    Err(_) => "Error: Command timed out after 30 seconds. Please try a more targeted search or specific directory (avoid `find /`).".to_string(),
                 }
             }
         },
