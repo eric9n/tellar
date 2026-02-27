@@ -16,7 +16,7 @@ use serde_json::json;
 use std::path::Path;
 
 /// The core agent loop for native tool-calling turns.
-pub(crate) async fn run_agent_loop(
+pub async fn run_agent_loop(
     initial_messages: Vec<llm::Message>,
     path: &Path,
     base_path: &Path,

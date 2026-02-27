@@ -1,4 +1,4 @@
-use tellar::{llm, steward};
+use tellar::{agent_loop, llm};
 use std::env;
 use std::fs;
 use tempfile::tempdir;
@@ -60,7 +60,7 @@ async fn test_full_agent_turn_with_gemini_3() {
     
     // 3. Run the actual agent loop
     // We expect the model to use built-in tools (ls/grep/read) and then answer.
-    let result = steward::run_agent_loop(
+    let result = agent_loop::run_agent_loop(
         initial_messages,
         &path,
         base_path,
