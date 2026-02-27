@@ -35,6 +35,8 @@ pub struct MultimodalPart {
     pub function_call: Option<serde_json::Value>,
     #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
     pub function_response: Option<serde_json::Value>,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -51,6 +53,7 @@ impl MultimodalPart {
             inline_data: None,
             function_call: None,
             function_response: None,
+            thought_signature: None,
         }
     }
 
@@ -63,15 +66,17 @@ impl MultimodalPart {
             }),
             function_call: None,
             function_response: None,
+            thought_signature: None,
         }
     }
     
-    pub fn function_call(name: &str, args: serde_json::Value) -> Self {
+    pub fn function_call(name: &str, args: serde_json::Value, thought_signature: Option<String>) -> Self {
         Self {
             text: None,
             inline_data: None,
             function_call: Some(json!({ "name": name, "args": args })),
             function_response: None,
+            thought_signature,
         }
     }
 
@@ -81,6 +86,7 @@ impl MultimodalPart {
             inline_data: None,
             function_call: None,
             function_response: Some(json!({ "name": name, "response": response })),
+            thought_signature: None,
         }
     }
 }
@@ -160,10 +166,15 @@ pub async fn generate_multimodal(
             let name = call["name"].as_str().unwrap_or("unknown");
             let args = call["args"].clone();
             
+            // Extract thoughtSignature if present on any part
+            let thought_signature = parts.as_array().unwrap().iter()
+                .find_map(|p| p["thoughtSignature"].as_str());
+
             let react_json = json!({
                 "thought": if text_acc.is_empty() { "Tool call triggered." } else { text_acc.trim() },
                 "tool": name,
-                "args": args
+                "args": args,
+                "thought_signature": thought_signature
             });
             return Ok(serde_json::to_string(&react_json).unwrap());
         }
@@ -224,3 +235,49 @@ pub async fn list_models(api_key: &str) -> anyhow::Result<Vec<String>> {
 }
 
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_multimodal_part_serialization() {
+        let part = MultimodalPart::function_call(
+            "test_tool",
+            json!({ "arg1": "val1" }),
+            Some("fake-signature".to_string())
+        );
+        let serialized = serde_json::to_value(&part).unwrap();
+        
+        assert_eq!(serialized["functionCall"]["name"], "test_tool");
+        assert_eq!(serialized["thoughtSignature"], "fake-signature");
+    }
+
+    #[test]
+    fn test_multimodal_part_deserialization() {
+        let data = json!({
+            "functionCall": {
+                "name": "test_tool",
+                "args": { "arg1": "val1" }
+            },
+            "thoughtSignature": "fake-signature"
+        });
+        let part: MultimodalPart = serde_json::from_value(data).unwrap();
+        
+        assert_eq!(part.thought_signature, Some("fake-signature".to_string()));
+    }
+
+    #[test]
+    fn test_thought_signature_extraction() {
+        let parts = json!([
+            { "text": "I will call a tool." },
+            { "thoughtSignature": "sig123" },
+            { "functionCall": { "name": "sh", "args": { "command": "ls" } } }
+        ]);
+        
+        let thought_signature = parts.as_array().unwrap().iter()
+            .find_map(|p| p["thoughtSignature"].as_str());
+            
+        assert_eq!(thought_signature, Some("sig123"));
+    }
+}

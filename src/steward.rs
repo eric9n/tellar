@@ -281,10 +281,11 @@ pub(crate) async fn run_agent_loop(
         if let Some(tool_name) = tool_call["tool"].as_str() {
             let default_args = json!({});
             let args = tool_call.get("args").unwrap_or(&default_args);
+            let thought_signature = tool_call["thought_signature"].as_str().map(|s| s.to_string());
             println!("🛠️ Action: `{}`", tool_name);
 
             // Record the tool call in history
-            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone()));
+            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone(), thought_signature));
             messages.push(llm::Message {
                 role: llm::MessageRole::Assistant,
                 parts: assistant_parts,

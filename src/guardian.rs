@@ -136,10 +136,11 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
         if let Some(tool_name) = tool_call["tool"].as_str() {
             let default_args = serde_json::json!({});
             let args = tool_call.get("args").unwrap_or(&default_args);
+            let thought_signature = tool_call["thought_signature"].as_str().map(|s| s.to_string());
             println!("🛡️ Guardian Action: `{}`", tool_name);
             
             // Record tool call
-            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone()));
+            assistant_parts.push(llm::MultimodalPart::function_call(tool_name, args.clone(), thought_signature));
             messages.push(llm::Message {
                 role: llm::MessageRole::Assistant,
                 parts: assistant_parts,
