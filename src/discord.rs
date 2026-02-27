@@ -9,6 +9,7 @@ use serenity::model::channel::{Message, GuildChannel};
 use serenity::model::gateway::{Ready, GatewayIntents};
 use serenity::model::guild::ScheduledEvent;
 use serenity::prelude::*;
+use serenity::all::CreateAttachment; // Added for file uploads
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -459,22 +460,63 @@ async fn get_http_client(token: &str) -> Arc<serenity::http::Http> {
     }
 }
 
-/// Send a message directly using the Bot Token
+/// Send a message directly using the Bot Token, with automatic chunking for text > 2000 chars
 pub async fn send_bot_message(token: &str, channel_id: &str, content: &str) -> anyhow::Result<serenity::model::channel::Message> {
     if token.is_empty() { return Err(anyhow::anyhow!("Discord token is empty")); }
     if channel_id.is_empty() || channel_id == "0" { 
         return Err(anyhow::anyhow!("Invalid channel ID: {}", channel_id)); 
     }
     
-    println!("📡 Sending Discord message to channel {} ({} chars)...", channel_id, content.len());
+    let http = get_http_client(token).await;
+    let c_id = channel_id.parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Invalid channel ID: {}", channel_id))?;
+
+    // ✂️ Automatic Chunking: Split content into parts of max 1900 chars
+    let max_length = 1900;
+    let mut last_msg = None;
+
+    if content.len() <= max_length {
+        let map = serde_json::json!({ "content": content });
+        last_msg = Some(http.send_message(c_id.into(), vec![], &map).await?);
+    } else {
+        println!("✂️ Content length {} exceeds Discord limit, chunking...", content.len());
+        let mut full_content = content.to_string();
+        while !full_content.is_empty() {
+            let chunk: String = full_content.chars().take(max_length).collect();
+            full_content = full_content.chars().skip(max_length).collect();
+            
+            let map = serde_json::json!({ "content": chunk });
+            last_msg = Some(http.send_message(c_id.into(), vec![], &map).await?);
+            // Small delay between chunks to avoid rate limit issues
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    last_msg.ok_or_else(|| anyhow::anyhow!("Failed to send any message chunks"))
+}
+
+/// Send a local file as an attachment to Discord
+pub async fn send_file_attachment(token: &str, channel_id: &str, file_path: &Path) -> anyhow::Result<serenity::model::channel::Message> {
+    if token.is_empty() || channel_id.is_empty() || channel_id == "0" { 
+        return Err(anyhow::anyhow!("Invalid parameters for file upload")); 
+    }
+    
+    if !file_path.exists() {
+        return Err(anyhow::anyhow!("File not found: {:?}", file_path));
+    }
+
+    println!("📡 Uploading file {:?} to Discord channel {}...", file_path, channel_id);
     
     let http = get_http_client(token).await;
-
     let c_id = channel_id.parse::<u64>()
         .map_err(|_| anyhow::anyhow!("Invalid channel ID: {}", channel_id))?;
     
-    let map = serde_json::json!({ "content": content });
-    let msg = http.send_message(c_id.into(), vec![], &map).await?;
+    let attachment = CreateAttachment::path(file_path).await
+        .map_err(|e| anyhow::anyhow!("Failed to create attachment: {}", e))?;
+    
+    let map = serde_json::json!({ "content": format!("📎 Attached file: `{}`", file_path.file_name().and_then(|s| s.to_str()).unwrap_or("file")) });
+    let msg = http.send_message(c_id.into(), vec![attachment], &map).await?;
+    
     Ok(msg)
 }
 

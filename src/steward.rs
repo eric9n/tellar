@@ -97,7 +97,7 @@ async fn execute_thread_file_internal(path: &PathBuf, base_path: &Path, config: 
 
             println!("⚙️ Executing step in #{}: {}", thread_id, task_desc);
 
-            let result = match run_react_loop(task_desc, &content, path, base_path, config).await {
+            let result = match run_react_loop(task_desc, &content, path, base_path, config, &channel_id).await {
                 Ok(res) => res,
                 Err(e) => {
                     let err_msg = format!("Error executing task: {}", e);
@@ -142,7 +142,7 @@ async fn execute_thread_file_internal(path: &PathBuf, base_path: &Path, config: 
         println!("🗣️ Conversational Mode in #{}...", thread_id);
         let _ = discord::broadcast_typing(&config.discord.token, &channel_id).await;
         
-        match run_conversational_loop(&content, path, base_path, config, trigger_id).await {
+        match run_conversational_loop(&content, path, base_path, config, trigger_id, &channel_id).await {
             Ok(result) => {
                 let sanitized_result = mask_sensitive_data(&result, config);
                 match discord::send_bot_message(
@@ -225,9 +225,15 @@ async fn execute_thread_file_internal(path: &PathBuf, base_path: &Path, config: 
     Ok(())
 }
 
-async fn run_react_loop(task: &str, full_context: &str, path: &Path, base_path: &Path, config: &Config) -> anyhow::Result<String> {
-    let channel_id = extract_channel_id_from_path(path);
-    let system_prompt = load_unified_prompt(base_path, &channel_id);
+pub(super) async fn run_react_loop(
+    task: &str,
+    full_context: &str,
+    path: &Path,
+    base_path: &Path,
+    config: &Config,
+    channel_id: &str,
+) -> anyhow::Result<String> {
+    let system_prompt = load_unified_prompt(base_path, channel_id);
     let tools = get_tool_definitions(base_path);
     
     let mut channel_memory = String::new();
@@ -326,7 +332,7 @@ async fn run_react_loop(task: &str, full_context: &str, path: &Path, base_path: 
             let args = tool_call.get("args").unwrap_or(&default_args);
             println!("🛠️ Action: calling `{}`", tool_name);
             
-            let output = dispatch_tool(tool_name, args, base_path, config).await;
+            let output = dispatch_tool(tool_name, args, base_path, config, channel_id).await;
             println!("👁️ Observation: {}", output);
             
             messages.push(llm::MultimodalPart::text(format!("Observation from `{}`: {}", tool_name, output)));
@@ -339,9 +345,15 @@ async fn run_react_loop(task: &str, full_context: &str, path: &Path, base_path: 
     Ok("Max iterations reached without explicit completion.".to_string())
 }
 
-async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Path, config: &Config, trigger_id: Option<String>) -> anyhow::Result<String> {
-    let channel_id = extract_channel_id_from_path(path);
-    let system_prompt = load_unified_prompt(base_path, &channel_id);
+pub(crate) async fn run_conversational_loop(
+    full_context: &str,
+    path: &Path,
+    base_path: &Path,
+    config: &Config,
+    trigger_id: Option<String>,
+    channel_id: &str,
+) -> anyhow::Result<String> {
+    let system_prompt = load_unified_prompt(base_path, channel_id);
     
     let mut channel_memory = String::new();
     if let Some(parent) = path.parent() {
@@ -434,7 +446,7 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
                 let args = json_val.get("args").unwrap_or(&default_args);
                 println!("🛠️  Action: `{}` with args: {}", tool_name, args);
                 
-                let observation = dispatch_tool(tool_name, args, base_path, config).await;
+                let observation = dispatch_tool(tool_name, args, base_path, config, channel_id).await;
                 println!("👁️  Observation: [{} characters]", observation.len());
                 
                 // Append observation to messages for the next turn
@@ -557,8 +569,19 @@ pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
 
 
 
-pub(crate) async fn dispatch_tool(name: &str, args: &Value, base_path: &Path, config: &Config) -> String {
+pub(crate) async fn dispatch_tool(name: &str, args: &Value, base_path: &Path, config: &Config, channel_id: &str) -> String {
     let output = match name {
+        "upload" => {
+            let rel_path = normalize_path(args["path"].as_str().unwrap_or(""));
+            if !is_path_safe(base_path, rel_path) {
+                return "Error: Access denied. Path must be within the guild directory.".to_string();
+            }
+            let full_path = base_path.join(rel_path);
+            match discord::send_file_attachment(&config.discord.token, channel_id, &full_path).await {
+                Ok(_) => format!("Successfully uploaded {} to Discord.", rel_path),
+                Err(e) => format!("Error uploading file: {}", e),
+            }
+        },
         "sh" => {
             let cmd_str = args["command"].as_str().unwrap_or("");
             if cmd_str.is_empty() { "Error: No command provided".into() } else {
@@ -751,6 +774,17 @@ pub(crate) fn get_tool_definitions(base_path: &Path) -> Value {
                     "command": { "type": "string", "description": "The shell command to execute" }
                 },
                 "required": ["command"]
+            }
+        },
+        {
+            "name": "upload",
+            "description": "Upload a file from the local system to the current Discord channel as an attachment. Use this for large files or when the user specifically asks for the file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the file within the guild (e.g. 'channels/General/data.txt') or absolute path if authorized." }
+                },
+                "required": ["path"]
             }
         }
     ]);

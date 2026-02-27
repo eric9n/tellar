@@ -136,7 +136,7 @@ async fn perform_guardian_pulse(base_path: &Path, config: &Config) -> anyhow::Re
             let args = tool_call.get("args").unwrap_or(&default_args);
             println!("🛡️ Guardian Action: calling `{}`", tool_name);
             
-            let output = steward::dispatch_tool(tool_name, args, base_path, config).await;
+            let output = steward::dispatch_tool(tool_name, args, base_path, config, "0").await;
             println!("🛡️ Guardian Observation: {}", output);
             
             messages.push(llm::MultimodalPart::text(format!("Observation from `{}`: {}", tool_name, output)));
