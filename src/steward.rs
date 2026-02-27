@@ -283,7 +283,7 @@ async fn run_react_loop(task: &str, full_context: &str, path: &Path, base_path: 
     );
 
     let mut turn = 0;
-    let max_turns = 5;
+    let max_turns = 50;
 
     while turn < max_turns {
         turn += 1;
@@ -394,7 +394,7 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
     let tools = get_tool_definitions(base_path);
     let mut messages = user_parts.clone();
     let mut turn = 0;
-    let max_turns = 20;
+    let max_turns = 50;
 
     while turn < max_turns {
         turn += 1;
