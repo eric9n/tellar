@@ -701,12 +701,12 @@ fn truncate_output(output: String) -> String {
     if output.len() > limit {
         // Find safe UTF-8 boundaries
         let mut prefix_end = 2500;
-        while !output.is_char_boundary(prefix_end) && prefix_end > 0 {
+        while prefix_end > 0 && !output.is_char_boundary(prefix_end) {
             prefix_end -= 1;
         }
         
         let mut suffix_start = output.len() - 2500;
-        while !output.is_char_boundary(suffix_start) && suffix_start < output.len() {
+        while suffix_start < output.len() && !output.is_char_boundary(suffix_start) {
             suffix_start += 1;
         }
 
@@ -714,8 +714,10 @@ fn truncate_output(output: String) -> String {
         let suffix = &output[suffix_start..];
         
         format!(
-            "{}\n\n... [TRUNCATED {} characters. Output exceeds 5,000 char safety limit. Use 'grep', 'offset' in 'read', or more specific commands to avoid token waste.] ...\n\n{}", 
-            prefix, output.len() - (prefix_end + (output.len() - suffix_start)), suffix
+            "{} ... [TRUNCATED {} bytes] ... {}\n\n💡 **Hint**: Data is too large for the session history. If you need the full original content or the entire file, please use the `upload` tool instead of displaying it here.",
+            prefix,
+            output.len() - (prefix_end + (output.len() - suffix_start)),
+            suffix
         )
     } else {
         output
@@ -767,7 +769,7 @@ pub(crate) fn get_tool_definitions(base_path: &Path) -> Value {
         },
         {
             "name": "sh",
-            "description": "Execute a shell command and return its output.",
+            "description": "Execute a shell command. Best for system discovery, grep, process status, and small output observation. For large data or sending files to the user, the `upload` tool is much more efficient.",
             "parameters": {
                 "type": "object",
                 "properties": {
