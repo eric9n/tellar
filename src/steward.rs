@@ -374,13 +374,6 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
         trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", tid));
     }
 
-    let full_prompt = format!(
-        "{}\n\n### Semantic Memory (Channel Knowledge):\n{}\n\n### Session History (Full Blackboard Context):\n{}\n\n### Current User Input (Specific Target):\n{}\n\nUse Markdown. Concise yet premium.",
-        system_prompt,
-        channel_memory,
-        full_context,
-        trigger_instruction
-    );
     
     let mut user_parts = vec![llm::MultimodalPart::text(format!(
         "### Current User Input (Specific Target):\n{}\n\nRespond naturally.",
@@ -397,9 +390,23 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
     let mut turn = 0;
     let max_turns = 50;
 
+    let system_prompt_base = system_prompt.clone();
+    let channel_mem_base = channel_memory.clone();
+    let trigger_instr_base = trigger_instruction.clone();
+
     while turn < max_turns {
         turn += 1;
         println!("🧠 Turn {}/{}: Conversational Reasoning...", turn, max_turns);
+
+        // 🟢 DYNAMIC STEERING: Reload context from blackboard file to see new user interruptions
+        let current_context = fs::read_to_string(path).unwrap_or_else(|_| "".to_string());
+        let full_prompt = format!(
+            "{}\n\n### Semantic Memory (Channel Knowledge):\n{}\n\n### Session History (Full Blackboard Context):\n{}\n\n### Current User Input (Specific Target):\n{}\n\nUse Markdown. Concise yet premium.",
+            system_prompt_base,
+            channel_mem_base,
+            current_context,
+            trigger_instr_base
+        );
 
         let result = llm::generate_multimodal(
             &full_prompt,
@@ -436,8 +443,13 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
             }
         }
 
-        // Fallback: If no structured JSON but model returned something, use it as final reply
-        if turn == 1 && !result.trim().is_empty() {
+        // 🔴 FALLBACK: If no structured JSON but model returned something in later turns,
+        // it likely finished in natural language or gave an explanation.
+        if !result.trim().is_empty() {
+             if turn > 1 {
+                 println!("⚠️  JSON parse failed in turn {}, treating as final response.", turn);
+                 println!("--- RAW RESULT ---\n{}\n------------------", result);
+             }
              return Ok(result);
         }
     }
