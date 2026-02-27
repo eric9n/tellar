@@ -392,40 +392,56 @@ async fn run_conversational_loop(full_context: &str, path: &Path, base_path: &Pa
     user_parts.append(&mut image_parts);
     
     let tools = get_tool_definitions(base_path);
-    
-    let result = llm::generate_multimodal(
-        &full_prompt,
-        user_parts.clone(),
-        &config.gemini.api_key,
-        &config.gemini.model,
-        0.7,
-        Some(serde_json::json!([{ "functionDeclarations": tools }]))
-    ).await?;
+    let mut messages = user_parts.clone();
+    let mut turn = 0;
+    let max_turns = 20;
 
-    // Parse structured JSON to handle both finish messages AND tool calls in chat
-    if let Some(json_val) = parse_llm_json(&result) {
-        if let Some(finish_msg) = json_val["finish"].as_str() {
-            println!("✅ Conversational reply extracted from JSON finish.");
-            return Ok(finish_msg.to_string());
+    while turn < max_turns {
+        turn += 1;
+        println!("🧠 Turn {}/{}: Conversational Reasoning...", turn, max_turns);
+
+        let result = llm::generate_multimodal(
+            &full_prompt,
+            messages.clone(),
+            &config.gemini.api_key,
+            &config.gemini.model,
+            0.7,
+            Some(serde_json::json!([{ "functionDeclarations": tools }]))
+        ).await?;
+
+        // Add model's raw output to messages to maintain state
+        messages.push(llm::MultimodalPart::text(result.clone()));
+
+        if let Some(json_val) = parse_llm_json(&result) {
+            if let Some(finish_msg) = json_val["finish"].as_str() {
+                println!("✅ Conversational reply finished on turn {}.", turn);
+                return Ok(finish_msg.to_string());
+            }
+
+            if let Some(tool_name) = json_val["tool"].as_str() {
+                let thought = json_val["thought"].as_str().unwrap_or("Thinking...");
+                println!("💬 Thought: {}", thought);
+                
+                let default_args = serde_json::json!({});
+                let args = json_val.get("args").unwrap_or(&default_args);
+                println!("🛠️  Action: `{}` with args: {}", tool_name, args);
+                
+                let observation = dispatch_tool(tool_name, args, base_path, config).await;
+                println!("👁️  Observation: [{} characters]", observation.len());
+                
+                // Append observation to messages for the next turn
+                messages.push(llm::MultimodalPart::text(format!("Observation:\n{}", observation)));
+                continue;
+            }
         }
 
-        if let Some(tool_name) = json_val["tool"].as_str() {
-            let thought = json_val["thought"].as_str().unwrap_or("Thinking about your request...");
-            println!("💬 Thought (Chat): {}", thought);
-            
-            let default_args = serde_json::json!({});
-            let args = json_val.get("args").unwrap_or(&default_args);
-            println!("🛠️  Executing tool from Chat: `{}`", tool_name);
-            
-            let observation = dispatch_tool(tool_name, args, base_path, config).await;
-            
-            // For now, in chat we do a single turn. If it called a tool, we return the observation.
-            // Future refinement: Multi-turn ReAct loop in chat.
-            return Ok(format!("{}\n\n**Observation:**\n{}", thought, observation));
+        // Fallback: If no structured JSON but model returned something, use it as final reply
+        if turn == 1 && !result.trim().is_empty() {
+             return Ok(result);
         }
     }
 
-    Ok(result)
+    Ok("Threshold Reached: I've performed multiple steps but haven't reached a final conclusion yet. Please ask me to continue if needed.".to_string())
 }
 
 /// Loads the unified system prompt: Base AGENTS.md + optional <CHANNEL_ID>.AGENTS.md
