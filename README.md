@@ -169,7 +169,7 @@ The core tools are designed around this layout: use `find` to locate paths, `ls`
 
 ### Installing Skills
 
-Tellar treats `SKILL.md` as the human-readable source document for a skill, and `SKILL.json` as the installed runtime artifact.
+Tellar treats `SKILL.md` as the canonical skill source. `SKILL.json` is an optional compiled cache that Tellar can generate for faster, more predictable runtime loading.
 
 Install a local skill by compiling its `SKILL.md` into `SKILL.json`:
 
@@ -181,8 +181,11 @@ This command uses your configured Gemini model to compile the skill into machine
 
 Runtime behavior:
 
-- If `SKILL.json` exists, Tellar uses it as the primary runtime definition.
-- If only `SKILL.md` exists, Tellar still supports it as a legacy fallback and logs a warning suggesting `tellarctl install-skill`.
+- If `SKILL.json` exists and is valid, Tellar uses it as a cache for runtime loading.
+- If `SKILL.json` is missing, Tellar reads `SKILL.md` directly.
+- If `SKILL.json` exists but is invalid, Tellar falls back to `SKILL.md`.
+
+`tellarctl install-skill` is therefore a build step for runtime speed and determinism, not a requirement for a skill to exist.
 
 ---
 

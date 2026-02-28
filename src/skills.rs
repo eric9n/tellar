@@ -119,7 +119,7 @@ impl SkillMetadata {
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "⚠️ Failed to load installed skill metadata at {}: {}",
+                                    "⚠️ Failed to load cached SKILL.json at {}: {}. Falling back to SKILL.md.",
                                     installed_file.display(),
                                     e
                                 );
@@ -131,11 +131,6 @@ impl SkillMetadata {
                     if skill_md.exists() {
                         match Self::from_file(&skill_md) {
                             Ok(meta) => {
-                                eprintln!(
-                                    "⚠️ Found legacy SKILL.md without SKILL.json at {}. Run `tellarctl install-skill {}` to compile it.",
-                                    skill_md.display(),
-                                    path.display()
-                                );
                                 skills.push((meta, path));
                             }
                             Err(e) => {
