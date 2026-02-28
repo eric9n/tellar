@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::context::{extract_and_load_images, load_unified_prompt, parse_task_document};
 use crate::discord;
 use crate::llm;
+use crate::skills::build_relevant_skill_guidance;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -101,6 +102,11 @@ pub(crate) async fn run_react_loop(
         channel_memory, global_memory
     ));
 
+    if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, task) {
+        system_prompt_str.push_str("\n\n");
+        system_prompt_str.push_str(&skill_guidance);
+    }
+
     let mut initial_messages = vec![llm::Message {
         role: llm::MessageRole::User,
         parts: vec![llm::MultimodalPart::text(format!(
@@ -169,6 +175,11 @@ pub(crate) async fn run_conversational_loop(
     let mut trigger_instruction = guidance;
     if let Some(id) = trigger_id {
         trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
+    }
+
+    if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, &trigger_instruction) {
+        system_prompt_str.push_str("\n\n");
+        system_prompt_str.push_str(&skill_guidance);
     }
 
     let mut initial_messages = vec![llm::Message {

@@ -54,6 +54,8 @@ The runtime is intentionally split into narrow modules instead of one monolithic
 
 Everything outside local cognition should be modeled as a **Skill**. Core tools inspect and modify durable workspace state; skills handle domain-specific or external capabilities and should preferably write their results back into the guild filesystem.
 
+Skills are treated as **user-installed, trusted local extensions**. Tellar starts each skill in that skill's directory for predictable relative paths, but it does **not** sandbox the skill to that directory. A skill can run host commands and access any location available to the Tellar process. Tellar does not attempt to provide partial or misleading isolation here: if you install a skill, you are responsible for reviewing and trusting its behavior.
+
 ### Discord Delivery Tools
 
 Tellar also exposes a dedicated Discord delivery layer for returning artifacts back to the active channel:
@@ -164,6 +166,23 @@ guild/
 - **`skills/`**: external or domain-specific capabilities beyond the core local tools.
 
 The core tools are designed around this layout: use `find` to locate paths, `ls` to inspect structure, `grep` to narrow content, and `read` before `write` or `edit`.
+
+### Installing Skills
+
+Tellar treats `SKILL.md` as the human-readable source document for a skill, and `SKILL.json` as the installed runtime artifact.
+
+Install a local skill by compiling its `SKILL.md` into `SKILL.json`:
+
+```bash
+tellarctl install-skill /path/to/skill
+```
+
+This command uses your configured Gemini model to compile the skill into machine-readable metadata, validates the result, and writes `SKILL.json` next to `SKILL.md`.
+
+Runtime behavior:
+
+- If `SKILL.json` exists, Tellar uses it as the primary runtime definition.
+- If only `SKILL.md` exists, Tellar still supports it as a legacy fallback and logs a warning suggesting `tellarctl install-skill`.
 
 ---
 
