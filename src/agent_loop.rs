@@ -85,7 +85,101 @@ pub async fn run_agent_loop(
         }
     }
 
-    Ok("Max iterations reached.".to_string())
+    Ok(summarize_after_max_turns(messages, config, system_prompt).await)
+}
+
+async fn summarize_after_max_turns(
+    mut messages: Vec<llm::Message>,
+    config: &Config,
+    system_prompt: &str,
+) -> String {
+    let fallback = build_max_turns_fallback(&messages);
+
+    messages.push(llm::Message {
+        role: llm::MessageRole::User,
+        parts: vec![llm::MultimodalPart::text(
+            "The previous attempt reached the maximum number of turns. Do not call any tools. \
+Summarize the most relevant progress and the concrete blockers from the recent tool results. \
+If the user needs to provide missing context or parameters, ask for that explicitly.",
+        )],
+    });
+
+    match llm::generate_turn(
+        system_prompt,
+        messages,
+        &config.gemini.api_key,
+        &config.gemini.model,
+        0.3,
+        None,
+    )
+    .await
+    {
+        Ok(llm::ModelTurn::Narrative(summary)) if !summary.trim().is_empty() => summary,
+        _ => fallback,
+    }
+}
+
+fn build_max_turns_fallback(messages: &[llm::Message]) -> String {
+    let mut issues = Vec::new();
+
+    for message in messages.iter().rev() {
+        if message.role != llm::MessageRole::ToolResult {
+            continue;
+        }
+
+        for part in &message.parts {
+            let Some(response) = part.function_response.as_ref() else {
+                continue;
+            };
+
+            let tool_name = response
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tool");
+            let payload = response.get("response");
+
+            let detail = payload
+                .and_then(|value| value.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    payload
+                        .and_then(|value| value.get("output"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+
+            let Some(detail) = detail else {
+                continue;
+            };
+
+            let normalized = detail.lines().next().unwrap_or(detail).trim();
+            let entry = format!("{}: {}", tool_name, normalized);
+
+            if !issues.contains(&entry) {
+                issues.push(entry);
+            }
+
+            if issues.len() >= 4 {
+                break;
+            }
+        }
+
+        if issues.len() >= 4 {
+            break;
+        }
+    }
+
+    if issues.is_empty() {
+        "I hit the maximum number of tool turns before finishing. Please narrow the request or \
+name the exact skill/tool you want me to use."
+            .to_string()
+    } else {
+        format!(
+            "I hit the maximum number of tool turns before finishing. The main blockers were:\n- {}\n\nPlease provide the missing context or narrow the request and I can retry.",
+            issues.into_iter().rev().collect::<Vec<_>>().join("\n- ")
+        )
+    }
 }
 
 pub(crate) async fn execute_tool_batch(
