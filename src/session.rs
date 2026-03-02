@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::context::{extract_and_load_images, load_unified_prompt, parse_task_document};
 use crate::discord;
 use crate::llm;
-use crate::skills::build_relevant_skill_guidance;
+use crate::skills::{build_relevant_skill_guidance, has_explicit_skill_match};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -102,16 +102,26 @@ pub(crate) async fn run_react_loop(
         channel_memory, global_memory
     ));
 
+    let explicit_skill_match = has_explicit_skill_match(base_path, task);
     if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, task) {
         system_prompt_str.push_str("\n\n");
         system_prompt_str.push_str(&skill_guidance);
     }
 
+    let objective_instruction = if explicit_skill_match {
+        "Use native tool calling. The user explicitly referenced a skill or skill tool. \
+Prioritize the matching discovered skill/tool before generic file exploration. If the named \
+skill/tool returns a useful result, answer the user directly instead of continuing with \
+find/ls/grep/read. Only fall back to local cognition tools if the named skill cannot satisfy the request."
+    } else {
+        "Use native tool calling. Prefer `find` when the path is unknown, `ls` when the directory is known, then `grep` to narrow matches, then `read` before `write` or `edit`. Use a discovered skill only when the task needs domain-specific or external capabilities. Use `finish` when the step is complete."
+    };
+
     let mut initial_messages = vec![llm::Message {
         role: llm::MessageRole::User,
         parts: vec![llm::MultimodalPart::text(format!(
-            "### Current Blackboard Context:\n{}\n\n### Your Objective:\nYou are currently processing the step: \"{}\".\nUse native tool calling. Prefer `find` when the path is unknown, `ls` when the directory is known, then `grep` to narrow matches, then `read` before `write` or `edit`. Use a discovered skill only when the task needs domain-specific or external capabilities. Use `finish` when the step is complete.",
-            full_context, task
+            "### Current Blackboard Context:\n{}\n\n### Your Objective:\nYou are currently processing the step: \"{}\".\n{}",
+            full_context, task, objective_instruction
         ))],
     }];
 
@@ -177,16 +187,23 @@ pub(crate) async fn run_conversational_loop(
         trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
     }
 
+    let explicit_skill_match = has_explicit_skill_match(base_path, &trigger_instruction);
     if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, &trigger_instruction) {
         system_prompt_str.push_str("\n\n");
         system_prompt_str.push_str(&skill_guidance);
     }
 
+    let response_instruction = if explicit_skill_match {
+        "Respond naturally. Use Markdown. The user explicitly named a skill or tool, so prioritize that matching discovered skill/tool first. If it returns a usable result, answer immediately instead of exploring with find/ls/grep/read. Only use local cognition tools when the named skill is insufficient or fails and you need to explain why."
+    } else {
+        "Respond naturally. Use Markdown. Prefer local cognition tools (`find`, `ls`, `grep`, `read`) before modifying files or invoking skills. Concise yet premium."
+    };
+
     let mut initial_messages = vec![llm::Message {
         role: llm::MessageRole::User,
         parts: vec![llm::MultimodalPart::text(format!(
-            "### Current User Input (Specific Target):\n{}\n\nRespond naturally. Use Markdown. Prefer local cognition tools (`find`, `ls`, `grep`, `read`) before modifying files or invoking skills. Concise yet premium.",
-            trigger_instruction
+            "### Current User Input (Specific Target):\n{}\n\n{}",
+            trigger_instruction, response_instruction
         ))],
     }];
 

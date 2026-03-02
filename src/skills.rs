@@ -175,6 +175,20 @@ pub fn build_relevant_skill_guidance(base_path: &Path, text: &str) -> Option<Str
     }
 }
 
+pub fn has_explicit_skill_match(base_path: &Path, text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+
+    SkillMetadata::discover_skills(base_path)
+        .into_iter()
+        .any(|(meta, _)| {
+            normalized.contains(&meta.name.to_ascii_lowercase())
+                || meta
+                    .tools
+                    .keys()
+                    .any(|tool_name| normalized.contains(&tool_name.to_ascii_lowercase()))
+        })
+}
+
 pub async fn execute_skill_tool(
     tool: &SkillTool,
     skill_dir: &Path,
