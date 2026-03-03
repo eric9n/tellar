@@ -1,39 +1,53 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
  * File Path: src/router.rs
- * Responsibility: Lightweight conversational request routing before the agent loop.
+ * Responsibility: LLM-backed conversational routing before the agent loop.
  */
 
-use crate::skills::find_explicit_tool_match;
+use crate::config::Config;
+use crate::llm;
+use crate::skills::SkillMetadata;
+use anyhow::{bail, Context, Result};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PlanStep {
+    CallTool { tool_name: String, args: Value },
+    Respond { instruction: String },
+    AskForMissing { prompt: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RequestRoute {
-    DirectTool { tool_name: String, args: Value },
-    UnsupportedRealtime { reason: String },
-    PlainConversation,
+    PlanAndExecute { steps: Vec<PlanStep> },
+    Reject { reason: String },
+    Agent,
 }
 
-fn extract_symbol(text: &str) -> Option<String> {
-    let full = Regex::new(r"\b([A-Z]{1,8}\.(?:US|HK|CN))\b").unwrap();
-    if let Some(caps) = full.captures(text) {
-        return caps.get(1).map(|m| m.as_str().to_string());
-    }
-
-    let bare = Regex::new(r"\b([A-Z]{1,6})\b").unwrap();
-    bare.captures(text)
-        .and_then(|caps| caps.get(1))
-        .map(|m| format!("{}.US", m.as_str()))
+#[derive(Debug, Deserialize)]
+struct RouteDecision {
+    route: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    steps: Vec<RouteDecisionStep>,
 }
 
-fn extract_expiry(text: &str) -> Option<String> {
-    let expiry = Regex::new(r"\b(20\d{2}-\d{2}-\d{2})\b").unwrap();
-    expiry
-        .captures(text)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string())
+#[derive(Debug, Deserialize)]
+struct RouteDecisionStep {
+    kind: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    args: Option<Value>,
+    #[serde(default)]
+    instruction: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 pub(crate) fn extract_trigger_message(full_context: &str, trigger_id: Option<&str>) -> String {
@@ -68,136 +82,168 @@ pub(crate) fn extract_trigger_message(full_context: &str, trigger_id: Option<&st
     full_context.to_string()
 }
 
-fn looks_like_realtime_external_query(text: &str) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    text.contains("天气")
-        || lowered.contains("weather")
-        || lowered.contains("汇率")
-        || lowered.contains("exchange rate")
-        || lowered.contains("新闻")
-        || lowered.contains("news")
-}
-
-fn looks_like_plain_conversation(text: &str) -> bool {
-    let trimmed = text.trim();
-    let lowered = trimmed.to_ascii_lowercase();
-
-    if trimmed.is_empty() || trimmed.len() > 48 {
-        return false;
+fn extract_json_object(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        return Ok(trimmed.to_string());
     }
 
-    if extract_symbol(trimmed).is_some() || extract_expiry(trimmed).is_some() {
-        return false;
-    }
-
-    let taskish_markers = [
-        "用 ",
-        "使用",
-        "查看",
-        "看下",
-        "抓取",
-        "读取",
-        "执行",
-        "生成",
-        "分析",
-        "report",
-        "stock_quote",
-        "option_",
-        "market-tone",
-        "snapshot",
-        "portfolio",
-        "/",
-    ];
-
-    if taskish_markers
-        .iter()
-        .any(|marker| trimmed.contains(marker) || lowered.contains(marker))
-    {
-        return false;
-    }
-
-    let conversational_markers = [
-        "这么直接",
-        "哈哈",
-        "好的",
-        "谢谢",
-        "在吗",
-        "你是谁",
-        "什么意思",
-        "怎么回事",
-        "why",
-        "really",
-        "thanks",
-        "hello",
-        "hi",
-    ];
-
-    conversational_markers
-        .iter()
-        .any(|marker| trimmed.contains(marker) || lowered.contains(marker))
-}
-
-pub(crate) fn classify_conversational_request(base_path: &Path, text: &str) -> Option<RequestRoute> {
-    if let Some(tool_name) = find_explicit_tool_match(base_path, text) {
-        let args = match tool_name.as_str() {
-            "stock_quote" | "option_expiries" | "probe" => {
-                extract_symbol(text).map(|symbol| json!({ "symbol": symbol }))
-            }
-            "option_quote" | "analyze_option" => {
-                extract_symbol(text).map(|symbol| json!({ "symbol": symbol }))
-            }
-            "option_chain" | "analyze_chain" | "market_tone" | "skew" | "smile" | "put_call_bias" => {
-                match (extract_symbol(text), extract_expiry(text)) {
-                    (Some(symbol), Some(expiry)) => Some(json!({ "symbol": symbol, "expiry": expiry })),
-                    _ => None,
-                }
-            }
-            "market_extreme" | "iv_rank" | "signal_history" => {
-                extract_symbol(text).map(|symbol| json!({ "symbol": symbol }))
-            }
-            "relative_extreme" => {
-                let symbol = extract_symbol(text)?;
-                Some(json!({ "symbol": symbol, "benchmark": "QQQ.US" }))
-            }
-            _ => None,
-        };
-
-        if let Some(args) = args {
-            return Some(RequestRoute::DirectTool { tool_name, args });
+    let fenced = Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```")
+        .expect("valid fenced json regex");
+    if let Some(caps) = fenced.captures(trimmed) {
+        if let Some(body) = caps.get(1) {
+            return Ok(body.as_str().trim().to_string());
         }
     }
 
-    let lowered = text.to_ascii_lowercase();
-    if (text.contains("股价") || lowered.contains("stock price") || lowered.contains("quote"))
-        && !lowered.contains("option")
-        && let Some(symbol) = extract_symbol(text)
-    {
-        return Some(RequestRoute::DirectTool {
-            tool_name: "stock_quote".to_string(),
-            args: json!({ "symbol": symbol }),
-        });
+    bail!("model output did not contain a JSON object")
+}
+
+fn collect_tool_specs(base_path: &Path) -> (HashSet<String>, Value) {
+    let mut allowed_tools = HashSet::new();
+    let mut tool_specs = Vec::new();
+
+    for (meta, _) in SkillMetadata::discover_skills(base_path) {
+        for (tool_name, tool) in meta.tools {
+            allowed_tools.insert(tool_name.clone());
+            tool_specs.push(json!({
+                "skill": meta.name,
+                "tool": tool_name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }));
+        }
     }
 
-    if (text.contains("到期日") || lowered.contains("expir"))
-        && let Some(symbol) = extract_symbol(text)
-    {
-        return Some(RequestRoute::DirectTool {
-            tool_name: "option_expiries".to_string(),
-            args: json!({ "symbol": symbol }),
-        });
-    }
+    (allowed_tools, Value::Array(tool_specs))
+}
 
-    if looks_like_realtime_external_query(text) {
-        return Some(RequestRoute::UnsupportedRealtime {
-            reason: "This looks like a real-time external information request, but no matching live data skill is installed for that category. I should say that directly instead of searching local files.".to_string(),
-        });
+fn validate_tool_args(raw: Option<Value>) -> Value {
+    match raw {
+        Some(Value::Object(map)) => Value::Object(map),
+        Some(Value::Null) | None => Value::Object(Map::new()),
+        Some(other) => json!({ "value": other }),
     }
+}
 
-    if looks_like_plain_conversation(text) {
-        return Some(RequestRoute::PlainConversation);
+fn validate_route_decision(
+    decision: RouteDecision,
+    allowed_tools: &HashSet<String>,
+) -> Result<RequestRoute> {
+    match decision.route.trim().to_ascii_lowercase().as_str() {
+        "agent" => Ok(RequestRoute::Agent),
+        "reject" => {
+            let reason = decision
+                .reason
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .context("reject route requires a non-empty reason")?;
+            Ok(RequestRoute::Reject { reason })
+        }
+        "plan" | "planandexecute" => {
+            if decision.steps.is_empty() {
+                bail!("plan route requires at least one step");
+            }
+
+            let mut steps = Vec::with_capacity(decision.steps.len());
+            for step in decision.steps {
+                let kind = step.kind.trim().to_ascii_lowercase();
+                match kind.as_str() {
+                    "calltool" | "call_tool" => {
+                        let tool_name = step
+                            .tool_name
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .context("CallTool step requires tool_name")?;
+                        if !allowed_tools.contains(&tool_name) {
+                            bail!("CallTool references unknown tool `{}`", tool_name);
+                        }
+                        steps.push(PlanStep::CallTool {
+                            tool_name,
+                            args: validate_tool_args(step.args),
+                        });
+                    }
+                    "respond" => {
+                        let instruction = step
+                            .instruction
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .context("Respond step requires instruction")?;
+                        steps.push(PlanStep::Respond { instruction });
+                    }
+                    "askformissing" | "ask_for_missing" => {
+                        let prompt = step
+                            .prompt
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .context("AskForMissing step requires prompt")?;
+                        steps.push(PlanStep::AskForMissing { prompt });
+                    }
+                    other => bail!("unsupported plan step kind `{}`", other),
+                }
+            }
+
+            Ok(RequestRoute::PlanAndExecute { steps })
+        }
+        other => bail!("unsupported route `{}`", other),
     }
+}
 
-    None
+pub(crate) async fn plan_conversational_request(
+    base_path: &Path,
+    config: &Config,
+    text: &str,
+) -> Result<RequestRoute> {
+    let (allowed_tools, tool_specs) = collect_tool_specs(base_path);
+
+    let routing_prompt = format!(
+        "You are Tellar's conversational router. Return exactly one JSON object and nothing else.\n\
+Classify the user request into one of three routes:\n\
+- \"plan\": for high-confidence deterministic handling using a finite plan\n\
+- \"reject\": for clearly unsupported requests that should be declined directly\n\
+- \"agent\": for ambiguous, open-ended, or exploratory requests that should go to the general agent loop\n\n\
+When route is \"plan\", every step must be one of:\n\
+- CallTool: requires tool_name and args (args must be a JSON object)\n\
+- Respond: requires instruction\n\
+- AskForMissing: requires prompt\n\n\
+Rules:\n\
+- Use only tools from the catalog below.\n\
+- Prefer \"plan\" for explicit tool requests or clear, narrow requests that map cleanly to one tool.\n\
+- Use AskForMissing when a deterministic tool is implied but required inputs are missing.\n\
+- Use Respond for plain conversational replies or post-tool commentary.\n\
+- Use Reject only when the request clearly asks for unsupported real-time external data or another capability not present in the tool catalog.\n\
+- Use Agent when the request is genuinely ambiguous or requires exploration.\n\n\
+Tool catalog:\n{}\n\n\
+Output schema:\n\
+{{\"route\":\"plan|reject|agent\",\"reason\":\"... only for reject\",\"steps\":[{{\"kind\":\"CallTool|Respond|AskForMissing\",...}}]}}",
+        serde_json::to_string_pretty(&tool_specs).unwrap_or_else(|_| "[]".to_string())
+    );
+
+    let user_prompt = format!("Route this request:\n{}", text);
+
+    let turn = llm::generate_turn(
+        &routing_prompt,
+        vec![llm::Message {
+            role: llm::MessageRole::User,
+            parts: vec![llm::MultimodalPart::text(user_prompt)],
+        }],
+        &config.gemini.api_key,
+        &config.gemini.model,
+        0.1,
+        None,
+    )
+    .await?;
+
+    let narrative = match turn {
+        llm::ModelTurn::Narrative(text) => text,
+        llm::ModelTurn::ToolCalls { .. } => bail!("routing model attempted tool calls"),
+    };
+
+    let json_payload = extract_json_object(&narrative)?;
+    let decision: RouteDecision = serde_json::from_str(&json_payload)
+        .with_context(|| format!("invalid router JSON: {}", json_payload))?;
+
+    validate_route_decision(decision, &allowed_tools)
 }
 
 #[cfg(test)]
@@ -212,8 +258,104 @@ mod tests {
         fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     }
 
+    fn tool_set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|v| v.to_string()).collect()
+    }
+
     #[test]
-    fn test_classify_conversational_request_routes_explicit_tool() {
+    fn test_validate_route_decision_accepts_tool_plan() {
+        let decision = RouteDecision {
+            route: "plan".to_string(),
+            reason: None,
+            steps: vec![RouteDecisionStep {
+                kind: "CallTool".to_string(),
+                tool_name: Some("stock_quote".to_string()),
+                args: Some(json!({ "symbol": "TSLA.US" })),
+                instruction: None,
+                prompt: None,
+            }],
+        };
+
+        let route = validate_route_decision(decision, &tool_set(&["stock_quote"])).unwrap();
+        match route {
+            RequestRoute::PlanAndExecute { steps } => {
+                assert_eq!(steps.len(), 1);
+                assert!(matches!(steps[0], PlanStep::CallTool { .. }));
+            }
+            _ => panic!("expected plan route"),
+        }
+    }
+
+    #[test]
+    fn test_validate_route_decision_accepts_ask_for_missing() {
+        let decision = RouteDecision {
+            route: "plan".to_string(),
+            reason: None,
+            steps: vec![RouteDecisionStep {
+                kind: "AskForMissing".to_string(),
+                tool_name: None,
+                args: None,
+                instruction: None,
+                prompt: Some("Need expiry".to_string()),
+            }],
+        };
+
+        let route = validate_route_decision(decision, &tool_set(&[])).unwrap();
+        match route {
+            RequestRoute::PlanAndExecute { steps } => {
+                assert!(matches!(steps[0], PlanStep::AskForMissing { .. }));
+            }
+            _ => panic!("expected plan route"),
+        }
+    }
+
+    #[test]
+    fn test_validate_route_decision_accepts_reject() {
+        let decision = RouteDecision {
+            route: "reject".to_string(),
+            reason: Some("No weather tool".to_string()),
+            steps: vec![],
+        };
+
+        let route = validate_route_decision(decision, &tool_set(&[])).unwrap();
+        match route {
+            RequestRoute::Reject { reason } => assert!(reason.contains("weather")),
+            _ => panic!("expected reject route"),
+        }
+    }
+
+    #[test]
+    fn test_validate_route_decision_rejects_unknown_tool() {
+        let decision = RouteDecision {
+            route: "plan".to_string(),
+            reason: None,
+            steps: vec![RouteDecisionStep {
+                kind: "CallTool".to_string(),
+                tool_name: Some("unknown_tool".to_string()),
+                args: Some(json!({})),
+                instruction: None,
+                prompt: None,
+            }],
+        };
+
+        assert!(validate_route_decision(decision, &tool_set(&["stock_quote"])).is_err());
+    }
+
+    #[test]
+    fn test_extract_trigger_message_prefers_exact_message_id_block() {
+        let content = concat!(
+            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t1 | **Message ID**: old\n\n",
+            "用 snapshot 的 stock_quote 看一下 TSLA.US 的实时股价\n",
+            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t2 | **Message ID**: new\n\n",
+            "益阳天气如何？ <@1475406915889533049>\n",
+        );
+
+        let extracted = extract_trigger_message(content, Some("new"));
+        assert_eq!(extracted, "益阳天气如何？ <@1475406915889533049>");
+    }
+
+    #[test]
+    fn test_collect_tool_specs_reads_installed_skills() {
         let dir = tempdir().unwrap();
         write_skill(
             dir.path(),
@@ -231,53 +373,8 @@ snapshot guidance
 "#,
         );
 
-        let dispatch = classify_conversational_request(
-            dir.path(),
-            "用 snapshot 的 stock_quote 看一下 TSLA.US 的实时股价",
-        )
-        .unwrap();
-
-        match dispatch {
-            RequestRoute::DirectTool { tool_name, args } => {
-                assert_eq!(tool_name, "stock_quote");
-                assert_eq!(args["symbol"], "TSLA.US");
-            }
-            _ => panic!("expected direct tool route"),
-        }
-    }
-
-    #[test]
-    fn test_classify_conversational_request_rejects_weather_query_without_tool() {
-        let dir = tempdir().unwrap();
-        let dispatch = classify_conversational_request(dir.path(), "益阳天气如何？").unwrap();
-
-        match dispatch {
-            RequestRoute::UnsupportedRealtime { .. } => {}
-            _ => panic!("expected unsupported realtime route"),
-        }
-    }
-
-    #[test]
-    fn test_classify_conversational_request_routes_short_small_talk() {
-        let dir = tempdir().unwrap();
-        let dispatch = classify_conversational_request(dir.path(), "这么直接的吗");
-
-        match dispatch {
-            Some(RequestRoute::PlainConversation) => {}
-            _ => panic!("expected plain conversation route"),
-        }
-    }
-
-    #[test]
-    fn test_extract_trigger_message_prefers_exact_message_id_block() {
-        let content = concat!(
-            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t1 | **Message ID**: old\n\n",
-            "用 snapshot 的 stock_quote 看一下 TSLA.US 的实时股价\n",
-            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t2 | **Message ID**: new\n\n",
-            "益阳天气如何？ <@1475406915889533049>\n",
-        );
-
-        let extracted = extract_trigger_message(content, Some("new"));
-        assert_eq!(extracted, "益阳天气如何？ <@1475406915889533049>");
+        let (allowed, specs) = collect_tool_specs(dir.path());
+        assert!(allowed.contains("stock_quote"));
+        assert!(specs.as_array().unwrap().iter().any(|entry| entry["tool"] == "stock_quote"));
     }
 }

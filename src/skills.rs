@@ -175,17 +175,37 @@ pub fn build_relevant_skill_guidance(base_path: &Path, text: &str) -> Option<Str
     }
 }
 
+fn matches_named_reference(haystack: &str, needle: &str) -> bool {
+    if haystack.contains(needle) {
+        return true;
+    }
+
+    let dash = needle.replace('_', "-");
+    if dash != needle && haystack.contains(&dash) {
+        return true;
+    }
+
+    let underscore = needle.replace('-', "_");
+    if underscore != needle && haystack.contains(&underscore) {
+        return true;
+    }
+
+    false
+}
+
 pub fn has_explicit_skill_match(base_path: &Path, text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
 
     SkillMetadata::discover_skills(base_path)
         .into_iter()
         .any(|(meta, _)| {
-            normalized.contains(&meta.name.to_ascii_lowercase())
+            matches_named_reference(&normalized, &meta.name.to_ascii_lowercase())
                 || meta
                     .tools
                     .keys()
-                    .any(|tool_name| normalized.contains(&tool_name.to_ascii_lowercase()))
+                    .any(|tool_name| {
+                        matches_named_reference(&normalized, &tool_name.to_ascii_lowercase())
+                    })
         })
 }
 
@@ -195,7 +215,7 @@ pub fn find_explicit_tool_match(base_path: &Path, text: &str) -> Option<String> 
     SkillMetadata::discover_skills(base_path)
         .into_iter()
         .flat_map(|(meta, _)| meta.tools.into_keys())
-        .find(|tool_name| normalized.contains(&tool_name.to_ascii_lowercase()))
+        .find(|tool_name| matches_named_reference(&normalized, &tool_name.to_ascii_lowercase()))
 }
 
 fn shell_quote(value: &str) -> String {

@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::context::{extract_and_load_images, load_unified_prompt, parse_task_document};
 use crate::discord;
 use crate::llm;
-use crate::router::{classify_conversational_request, extract_trigger_message, RequestRoute};
+use crate::router::{extract_trigger_message, plan_conversational_request, PlanStep, RequestRoute};
 use crate::skills::{build_relevant_skill_guidance, has_explicit_skill_match};
 use crate::tools::dispatch_tool;
 use regex::Regex;
@@ -49,7 +49,7 @@ fn unsupported_request_note(text: &str, config: &Config) -> Option<String> {
     }
 }
 
-async fn run_direct_conversational_dispatch(
+async fn run_routed_conversational_dispatch(
     dispatch: RequestRoute,
     base_path: &Path,
     config: &Config,
@@ -58,40 +58,62 @@ async fn run_direct_conversational_dispatch(
     user_text: &str,
 ) -> anyhow::Result<String> {
     match dispatch {
-        RequestRoute::UnsupportedRealtime { reason } => Ok(format!(
+        RequestRoute::Agent => Ok(
+            "I couldn't build a controlled execution plan for that request, so it needs the general agent path instead."
+                .to_string(),
+        ),
+        RequestRoute::Reject { reason } => Ok(format!(
             "I can't answer that reliably right now because I don't have a matching live data tool for that request. {}",
             reason
         )),
-        RequestRoute::PlainConversation => {
-            match llm::generate_turn(
-                system_prompt,
-                vec![llm::Message {
-                    role: llm::MessageRole::User,
-                    parts: vec![llm::MultimodalPart::text(user_text.to_string())],
-                }],
-                &config.gemini.api_key,
-                &config.gemini.model,
-                0.5,
-                None,
-            )
-            .await?
-            {
-                llm::ModelTurn::Narrative(result) => Ok(result),
-                llm::ModelTurn::ToolCalls { .. } => Ok(
-                    "I can answer that directly, but the current conversation path attempted tool use unexpectedly. Please retry the message and I should respond normally.".to_string()
-                ),
+        RequestRoute::PlanAndExecute { steps } => {
+            let mut last_output: Option<String> = None;
+
+            for step in steps {
+                match step {
+                    PlanStep::CallTool { tool_name, args } => {
+                        let result = dispatch_tool(&tool_name, &args, base_path, config, channel_id).await;
+                        if result.is_error {
+                            return Ok(format!(
+                                "I tried `{}` but it failed:\n{}",
+                                tool_name, result.output
+                            ));
+                        }
+                        last_output = Some(result.output);
+                    }
+                    PlanStep::Respond { instruction } => {
+                        let observation = last_output.clone().unwrap_or_default();
+                        let response_prompt = format!(
+                            "### Original User Request\n{}\n\n### Tool Result\n{}\n\n### Your Task\n{}",
+                            user_text, observation, instruction
+                        );
+
+                        match llm::generate_turn(
+                            system_prompt,
+                            vec![llm::Message {
+                                role: llm::MessageRole::User,
+                                parts: vec![llm::MultimodalPart::text(response_prompt)],
+                            }],
+                            &config.gemini.api_key,
+                            &config.gemini.model,
+                            0.4,
+                            None,
+                        )
+                        .await?
+                        {
+                            llm::ModelTurn::Narrative(result) => return Ok(result),
+                            llm::ModelTurn::ToolCalls { .. } => {
+                                return Ok(last_output.unwrap_or_else(|| {
+                                    "I completed the requested tool call, but I could not finish the follow-up explanation without falling back into tool use.".to_string()
+                                }));
+                            }
+                        }
+                    }
+                    PlanStep::AskForMissing { prompt } => return Ok(prompt),
+                }
             }
-        }
-        RequestRoute::DirectTool { tool_name, args } => {
-            let result = dispatch_tool(&tool_name, &args, base_path, config, channel_id).await;
-            if result.is_error {
-                Ok(format!(
-                    "I tried `{}` but it failed:\n{}",
-                    tool_name, result.output
-                ))
-            } else {
-                Ok(result.output)
-            }
+
+            Ok(last_output.unwrap_or_default())
         }
     }
 }
@@ -224,9 +246,17 @@ pub(crate) async fn run_conversational_loop(
         trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
     }
 
-    if let Some(dispatch) = classify_conversational_request(base_path, &trigger_instruction) {
-        return run_direct_conversational_dispatch(
-            dispatch,
+    let routed = match plan_conversational_request(base_path, config, &trigger_instruction).await {
+        Ok(route) => route,
+        Err(err) => {
+            eprintln!("⚠️ Conversational router failed, falling back to agent loop: {}", err);
+            RequestRoute::Agent
+        }
+    };
+
+    if !matches!(routed, RequestRoute::Agent) {
+        return run_routed_conversational_dispatch(
+            routed,
             base_path,
             config,
             channel_id,
