@@ -660,8 +660,8 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_id_from_folder_supports_legacy_and_current_formats() {
-        assert_eq!(extract_id_from_folder("General (123456)"), Some("123456".to_string()));
+    fn test_extract_id_from_folder_accepts_dash_suffix_only() {
+        assert_eq!(extract_id_from_folder("General (123456)"), None);
         assert_eq!(extract_id_from_folder("general-123456"), Some("123456".to_string()));
     }
 
@@ -676,14 +676,11 @@ mod tests {
 
 
 /// Helper to extract the stored channel-id suffix from a folder name.
-/// Supports both legacy `name (123456)` and current `name-123456`.
+/// Only the `name-123456` suffix format is supported.
 pub fn extract_id_from_folder(folder_name: &str) -> Option<String> {
-    let re = regex::Regex::new(r"(?:\((\d+)\)|-(\d+))$").ok()?;
-    let captures = re.captures(folder_name)?;
-    captures
-        .get(1)
-        .or_else(|| captures.get(2))
-        .map(|m| m.as_str().to_string())
+    let re = regex::Regex::new(r"-(\d+)$").ok()?;
+    re.captures(folder_name)
+        .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Helper to fetch channels on startup (adapter for serenity)
