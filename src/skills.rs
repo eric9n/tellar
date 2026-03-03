@@ -198,6 +198,176 @@ pub fn find_explicit_tool_match(base_path: &Path, text: &str) -> Option<String> 
         .find(|tool_name| normalized.contains(&tool_name.to_ascii_lowercase()))
 }
 
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    let escaped = value.replace('\'', r#"'\''"#);
+    format!("'{}'", escaped)
+}
+
+fn lookup_path<'a>(root: &'a Value, current: &'a Value, key: &str) -> Option<&'a Value> {
+    if key == "." {
+        return Some(current);
+    }
+
+    let resolve_from = |base: &'a Value, path: &str| -> Option<&'a Value> {
+        let mut value = base;
+        for segment in path.split('.') {
+            value = value.get(segment)?;
+        }
+        Some(value)
+    };
+
+    resolve_from(current, key).or_else(|| resolve_from(root, key))
+}
+
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(v) => *v,
+        Value::Number(_) => true,
+        Value::String(v) => !v.is_empty(),
+        Value::Array(v) => !v.is_empty(),
+        Value::Object(_) => true,
+    }
+}
+
+fn template_value_to_shell(value: &Value) -> Option<String> {
+    match value {
+        Value::String(v) => Some(shell_quote(v)),
+        Value::Number(v) => Some(shell_quote(&v.to_string())),
+        Value::Bool(v) => Some(shell_quote(&v.to_string())),
+        Value::Null => Some(shell_quote("")),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value)
+            .ok()
+            .map(|serialized| shell_quote(&serialized)),
+    }
+}
+
+fn find_section_close(template: &str, name: &str, body_start: usize) -> Option<(usize, usize)> {
+    let mut depth = 1usize;
+    let mut search_from = body_start;
+    let open_tag = format!("{{{{#{}}}}}", name);
+    let inverted_tag = format!("{{{{^{}}}}}", name);
+    let close_tag = format!("{{{{/{}}}}}", name);
+
+    while let Some(rel) = template[search_from..].find("{{") {
+        let tag_start = search_from + rel;
+        let rest = &template[tag_start..];
+
+        if rest.starts_with(&open_tag) || rest.starts_with(&inverted_tag) {
+            depth += 1;
+            search_from = tag_start + 2;
+            continue;
+        }
+
+        if rest.starts_with(&close_tag) {
+            depth -= 1;
+            if depth == 0 {
+                return Some((tag_start, tag_start + close_tag.len()));
+            }
+            search_from = tag_start + 2;
+            continue;
+        }
+
+        search_from = tag_start + 2;
+    }
+
+    None
+}
+
+fn render_template_fragment(template: &str, root: &Value, current: &Value) -> Result<String> {
+    let mut out = String::new();
+    let mut pos = 0usize;
+
+    while let Some(rel_start) = template[pos..].find("{{") {
+        let start = pos + rel_start;
+        out.push_str(&template[pos..start]);
+
+        let rest = &template[start + 2..];
+        let Some(rel_end) = rest.find("}}") else {
+            return Err(anyhow!("Unclosed template tag in skill command template"));
+        };
+        let end = start + 2 + rel_end;
+        let tag = rest[..rel_end].trim();
+        pos = end + 2;
+
+        if let Some(name) = tag.strip_prefix('#').map(str::trim) {
+            let body_start = pos;
+            let Some((close_start, close_end)) = find_section_close(template, name, body_start) else {
+                return Err(anyhow!("Unclosed section `{}` in skill command template", name));
+            };
+            let body = &template[body_start..close_start];
+            let value = lookup_path(root, current, name).unwrap_or(&Value::Null);
+
+            match value {
+                Value::Array(items) => {
+                    for item in items {
+                        out.push_str(&render_template_fragment(body, root, item)?);
+                    }
+                }
+                _ if is_truthy(value) => {
+                    out.push_str(&render_template_fragment(body, root, value)?);
+                }
+                _ => {}
+            }
+
+            pos = close_end;
+            continue;
+        }
+
+        if let Some(name) = tag.strip_prefix('^').map(str::trim) {
+            let body_start = pos;
+            let Some((close_start, close_end)) = find_section_close(template, name, body_start) else {
+                return Err(anyhow!("Unclosed inverted section `{}` in skill command template", name));
+            };
+            let body = &template[body_start..close_start];
+            let value = lookup_path(root, current, name).unwrap_or(&Value::Null);
+
+            if !is_truthy(value) {
+                out.push_str(&render_template_fragment(body, root, current)?);
+            }
+
+            pos = close_end;
+            continue;
+        }
+
+        if tag.starts_with('/') {
+            return Err(anyhow!("Unexpected closing tag `{}` in skill command template", tag));
+        }
+
+        if tag.starts_with('!') {
+            continue;
+        }
+
+        let value = lookup_path(root, current, tag).ok_or_else(|| {
+            anyhow!("Missing template value for `{}` in skill command template", tag)
+        })?;
+        let replacement = template_value_to_shell(value).ok_or_else(|| {
+            anyhow!("Unsupported template value for `{}` in skill command template", tag)
+        })?;
+        out.push_str(&replacement);
+    }
+
+    out.push_str(&template[pos..]);
+    Ok(out)
+}
+
+fn render_simple_shell_template(shell: &str, args: &Value) -> Result<String> {
+    let rendered = render_template_fragment(shell, args, args)?;
+
+    if rendered.contains("{{") || rendered.contains("}}") {
+        return Err(anyhow!(
+            "Unresolved skill command template placeholders remain: `{}`",
+            rendered
+        ));
+    }
+
+    Ok(rendered)
+}
+
 pub async fn execute_skill_tool(
     tool: &SkillTool,
     skill_dir: &Path,
@@ -205,13 +375,13 @@ pub async fn execute_skill_tool(
     args: &Value,
     config: &crate::config::Config,
 ) -> Result<String> {
-    let command_line = tool.shell.trim();
+    let command_line = render_simple_shell_template(tool.shell.trim(), args)?;
     if command_line.is_empty() {
         return Err(anyhow!("Empty execution line in skill tool"));
     }
 
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-lc").arg(command_line);
+    cmd.arg("-lc").arg(&command_line);
 
     let args_json = serde_json::to_string(args)?;
 
@@ -383,5 +553,86 @@ Use this skill when the user asks for sample operations.
         let guidance = build_relevant_skill_guidance(guild.path(), "please use sample here").unwrap();
         assert!(guidance.contains("Skill: sample"));
         assert!(guidance.contains("sample operations"));
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_replaces_scalar_placeholders() {
+        let rendered = render_simple_shell_template(
+            "./snapshot.sh stock-quote --symbol {{symbol}} --limit {{limit}}",
+            &json!({
+                "symbol": "TSLA.US",
+                "limit": 5
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "./snapshot.sh stock-quote --symbol 'TSLA.US' --limit '5'");
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_rejects_unresolved_placeholders() {
+        let err = render_simple_shell_template(
+            "./snapshot.sh stock-quote --symbol {{symbol}}",
+            &json!({}),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Missing template value for `symbol`"));
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_supports_all_json_value_types() {
+        let rendered = render_simple_shell_template(
+            "cmd {{str}} {{num}} {{bool}} {{nullv}} {{arr}} {{obj}}",
+            &json!({
+                "str": "hello",
+                "num": 5,
+                "bool": true,
+                "nullv": null,
+                "arr": [1, "x"],
+                "obj": { "k": "v" }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "cmd 'hello' '5' 'true' '' '[1,\"x\"]' '{\"k\":\"v\"}'"
+        );
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_supports_boolean_sections() {
+        let rendered = render_simple_shell_template(
+            "cmd{{#json}} --json{{/json}}{{^json}} --no-json{{/json}}",
+            &json!({ "json": true }),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "cmd --json");
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_supports_inverted_sections() {
+        let rendered = render_simple_shell_template(
+            "cmd{{#json}} --json{{/json}}{{^json}} --no-json{{/json}}",
+            &json!({ "json": false }),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "cmd --no-json");
+    }
+
+    #[test]
+    fn test_render_simple_shell_template_supports_array_sections_and_dot() {
+        let rendered = render_simple_shell_template(
+            "cmd{{#symbols}} --symbol {{.}}{{/symbols}}",
+            &json!({ "symbols": ["TSLA.US", "QQQ.US"] }),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "cmd --symbol 'TSLA.US' --symbol 'QQQ.US'");
     }
 }
