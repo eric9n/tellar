@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use serde_json::json;
 use once_cell::sync::Lazy;
+use regex::Regex;
 
 static POOLED_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -63,6 +64,50 @@ pub enum ModelTurn {
         calls: Vec<ToolCallRequest>,
         parts: Vec<MultimodalPart>,
     },
+}
+
+fn parse_pseudo_function_call(raw: &str) -> Option<ToolCallRequest> {
+    let call_re = Regex::new(r"call:([A-Za-z_][A-Za-z0-9_-]*)(?:\s*(\{.*\}))?").ok()?;
+    let caps = call_re.captures(raw)?;
+    let name = caps.get(1)?.as_str().to_string();
+
+    let args = if let Some(arg_match) = caps.get(2) {
+        let raw_args = arg_match.as_str();
+        let key_re = Regex::new(r#"([{\s,])([A-Za-z_][A-Za-z0-9_]*)\s*:"#).ok()?;
+        let normalized = key_re.replace_all(raw_args, "$1\"$2\":");
+        serde_json::from_str::<serde_json::Value>(&normalized).ok()?
+    } else {
+        json!({})
+    };
+
+    Some(ToolCallRequest {
+        id: format!("{}_recovered", name),
+        name,
+        args: if args.is_object() { args } else { json!({ "value": args }) },
+    })
+}
+
+fn try_recover_malformed_function_call(res_json: &serde_json::Value) -> Option<ModelTurn> {
+    let reason = res_json["candidates"][0]["finishReason"].as_str()?;
+    if reason != "MALFORMED_FUNCTION_CALL" {
+        return None;
+    }
+
+    let finish_message = res_json["candidates"][0]["finishMessage"].as_str()?;
+    let call_source = finish_message
+        .strip_prefix("Malformed function call:")
+        .unwrap_or(finish_message)
+        .trim();
+
+    let recovered = parse_pseudo_function_call(call_source)?;
+    Some(ModelTurn::ToolCalls {
+        thought: Some(
+            "Recovered a malformed Gemini function call into a validated tool request."
+                .to_string(),
+        ),
+        calls: vec![recovered],
+        parts: Vec::new(),
+    })
 }
 
 impl MultimodalPart {
@@ -237,6 +282,11 @@ pub async fn generate_turn(
         }
     }
 
+    if let Some(recovered) = try_recover_malformed_function_call(&res_json) {
+        eprintln!("🟡 [LLM RECOVERY] Recovered malformed function call into a tool request.");
+        return Ok(recovered);
+    }
+
     // Fallback if no text or function call was found
     let reason = res_json["candidates"][0]["finishReason"].as_str().unwrap_or("UNKNOWN");
     let msg = if reason == "SAFETY" {
@@ -349,5 +399,33 @@ mod tests {
 
         assert_eq!(serialized["functionResponse"]["name"], "test_tool");
         assert_eq!(serialized["functionResponse"]["id"], "tool-9");
+    }
+
+    #[test]
+    fn test_parse_pseudo_function_call_recovers_simple_args() {
+        let recovered = parse_pseudo_function_call(r#"call:ls{path:"skills"}"#).unwrap();
+        assert_eq!(recovered.name, "ls");
+        assert_eq!(recovered.args["path"], "skills");
+    }
+
+    #[test]
+    fn test_try_recover_malformed_function_call_returns_tool_turn() {
+        let payload = json!({
+            "candidates": [{
+                "content": {},
+                "finishMessage": "Malformed function call: call:ls{path:\"channels\"}",
+                "finishReason": "MALFORMED_FUNCTION_CALL",
+                "index": 0
+            }]
+        });
+
+        match try_recover_malformed_function_call(&payload).unwrap() {
+            ModelTurn::ToolCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "ls");
+                assert_eq!(calls[0].args["path"], "channels");
+            }
+            _ => panic!("expected recovered tool calls"),
+        }
     }
 }
