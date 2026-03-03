@@ -189,6 +189,15 @@ pub fn has_explicit_skill_match(base_path: &Path, text: &str) -> bool {
         })
 }
 
+pub fn find_explicit_tool_match(base_path: &Path, text: &str) -> Option<String> {
+    let normalized = text.to_ascii_lowercase();
+
+    SkillMetadata::discover_skills(base_path)
+        .into_iter()
+        .flat_map(|(meta, _)| meta.tools.into_keys())
+        .find(|tool_name| normalized.contains(&tool_name.to_ascii_lowercase()))
+}
+
 pub async fn execute_skill_tool(
     tool: &SkillTool,
     skill_dir: &Path,
