@@ -350,7 +350,7 @@ pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
     }
 }
 
-fn core_tool_definitions() -> Vec<Value> {
+pub(crate) fn core_tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "ls",
@@ -694,7 +694,7 @@ fn truncate_output(output: String, limit: usize) -> String {
     }
 }
 
-pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value {
+pub(crate) fn get_routing_tool_definitions(base_path: &Path) -> Value {
     let mut tools = json!(core_tool_definitions());
 
     for tool in delivery::delivery_tool_definitions() {
@@ -712,6 +712,10 @@ pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value 
         }
     }
     tools
+}
+
+pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value {
+    get_routing_tool_definitions(base_path)
 }
 
 #[cfg(test)]

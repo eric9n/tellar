@@ -6,7 +6,7 @@
 
 use crate::config::Config;
 use crate::llm;
-use crate::skills::SkillMetadata;
+use crate::tools::get_routing_tool_definitions;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde::Deserialize;
@@ -140,22 +140,16 @@ fn extract_json_object(raw: &str) -> Result<String> {
 }
 
 fn collect_tool_specs(base_path: &Path) -> (HashSet<String>, Value) {
-    let mut allowed_tools = HashSet::new();
-    let mut tool_specs = Vec::new();
+    let tool_specs = get_routing_tool_definitions(base_path);
+    let allowed_tools = tool_specs
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
 
-    for (meta, _) in SkillMetadata::discover_skills(base_path) {
-        for (tool_name, tool) in meta.tools {
-            allowed_tools.insert(tool_name.clone());
-            tool_specs.push(json!({
-                "skill": meta.name,
-                "tool": tool_name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            }));
-        }
-    }
-
-    (allowed_tools, Value::Array(tool_specs))
+    (allowed_tools, tool_specs)
 }
 
 fn validate_tool_args(raw: Option<Value>) -> Value {
@@ -429,7 +423,19 @@ snapshot guidance
         );
 
         let (allowed, specs) = collect_tool_specs(dir.path());
+        assert!(allowed.contains("ls"));
+        assert!(allowed.contains("send_attachment"));
         assert!(allowed.contains("stock_quote"));
-        assert!(specs.as_array().unwrap().iter().any(|entry| entry["tool"] == "stock_quote"));
+        assert!(specs.as_array().unwrap().iter().any(|entry| entry["name"] == "ls"));
+        assert!(specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "send_attachment"));
+        assert!(specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "stock_quote"));
     }
 }
