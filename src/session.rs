@@ -75,6 +75,41 @@ fn extract_expiry(text: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
+fn extract_trigger_message(full_context: &str, trigger_id: Option<&str>) -> String {
+    if let Some(id) = trigger_id {
+        let marker = format!("**Message ID**: {}", id);
+        if let Some(marker_pos) = full_context.find(&marker) {
+            let after_marker = &full_context[marker_pos + marker.len()..];
+            if let Some(body_start_rel) = after_marker.find("\n\n") {
+                let body_start = marker_pos + marker.len() + body_start_rel + 2;
+                let after_body = &full_context[body_start..];
+                let body_end = after_body
+                    .find("\n---\n**Author**:")
+                    .map(|offset| body_start + offset)
+                    .unwrap_or(full_context.len());
+                let extracted = full_context[body_start..body_end].trim();
+                if !extracted.is_empty() {
+                    return extracted.to_string();
+                }
+            }
+        }
+    }
+
+    let anchor = "> [Tellar]";
+    let guidance = if let Some(pos) = full_context.rfind(anchor) {
+        let increment = &full_context[pos..];
+        if let Some(msg_start) = increment.find("\n---\n**Author**") {
+            increment[msg_start..].trim().to_string()
+        } else {
+            "Check for follow-up or ritual steps.".to_string()
+        }
+    } else {
+        full_context.to_string()
+    };
+
+    guidance
+}
+
 fn looks_like_realtime_external_query(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
     text.contains("天气")
@@ -279,25 +314,10 @@ pub(crate) async fn run_conversational_loop(
     trigger_id: Option<String>,
     channel_id: &str,
 ) -> anyhow::Result<String> {
-    let trigger_instruction = {
-        let anchor = "> [Tellar]";
-        let guidance = if let Some(pos) = full_context.rfind(anchor) {
-            let increment = &full_context[pos..];
-            if let Some(msg_start) = increment.find("\n---\n**Author**") {
-                increment[msg_start..].trim().to_string()
-            } else {
-                "Check for follow-up or ritual steps.".to_string()
-            }
-        } else {
-            full_context.to_string()
-        };
-
-        let mut instruction = guidance;
-        if let Some(id) = trigger_id.clone() {
-            instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
-        }
-        instruction
-    };
+    let mut trigger_instruction = extract_trigger_message(full_context, trigger_id.as_deref());
+    if let Some(id) = trigger_id.clone() {
+        trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
+    }
 
     if let Some(dispatch) = classify_conversational_request(base_path, &trigger_instruction) {
         return run_direct_conversational_dispatch(dispatch, base_path, config, channel_id).await;
@@ -483,5 +503,18 @@ snapshot guidance
             ConversationalDispatch::UnsupportedRealtime { .. } => {}
             _ => panic!("expected unsupported realtime route"),
         }
+    }
+
+    #[test]
+    fn test_extract_trigger_message_prefers_exact_message_id_block() {
+        let content = concat!(
+            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t1 | **Message ID**: old\n\n",
+            "用 snapshot 的 stock_quote 看一下 TSLA.US 的实时股价\n",
+            "\n---\n**Author**: Dagow (ID: 1) | **Time**: t2 | **Message ID**: new\n\n",
+            "益阳天气如何？ <@1475406915889533049>\n",
+        );
+
+        let extracted = extract_trigger_message(content, Some("new"));
+        assert_eq!(extracted, "益阳天气如何？ <@1475406915889533049>");
     }
 }
