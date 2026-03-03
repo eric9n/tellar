@@ -139,8 +139,34 @@ fn extract_json_object(raw: &str) -> Result<String> {
     bail!("model output did not contain a JSON object")
 }
 
-fn collect_tool_specs(base_path: &Path) -> (HashSet<String>, Value) {
-    let tool_specs = get_routing_tool_definitions(base_path);
+fn has_host_absolute_path(text: &str) -> bool {
+    let host_path = Regex::new(r#"(^|[\s`'"(])/(?:[^/\s]+/)*[^/\s]+"#).expect("valid host path regex");
+    host_path.is_match(text)
+}
+
+fn collect_tool_specs(base_path: &Path, config: &Config, text: &str) -> (HashSet<String>, Value) {
+    let mut tool_specs = get_routing_tool_definitions(base_path);
+    if has_host_absolute_path(text) {
+        let allowed_host_tools = if config.runtime.privileged {
+            ["exec", "send_attachment", "send_attachments"]
+        } else {
+            ["exec", "send_attachment", "send_attachments"]
+        };
+        let filtered = tool_specs
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                entry.get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| allowed_host_tools.contains(&name))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        tool_specs = Value::Array(filtered);
+    }
+
     let allowed_tools = tool_specs
         .as_array()
         .into_iter()
@@ -228,7 +254,7 @@ pub(crate) async fn plan_conversational_request(
     config: &Config,
     text: &str,
 ) -> Result<RequestRoute> {
-    let (allowed_tools, tool_specs) = collect_tool_specs(base_path);
+    let (allowed_tools, tool_specs) = collect_tool_specs(base_path, config, text);
 
     let routing_prompt = format!(
         "You are Tellar's conversational router. Return exactly one JSON object and nothing else.\n\
@@ -246,6 +272,7 @@ Rules:\n\
 - Use AskForMissing when a deterministic tool is implied but required inputs are missing.\n\
 - Use Respond for plain conversational replies or post-tool commentary.\n\
 - Use Reject only when the request clearly asks for unsupported real-time external data or another capability not present in the tool catalog.\n\
+- If the request references an absolute host path such as /root/... or /var/..., do not choose guild-scoped file tools. Use only host-capable tools from the catalog.\n\
 - Use Agent when the request is genuinely ambiguous or requires exploration.\n\n\
 Tool catalog:\n{}\n\n\
 Output schema:\n\
@@ -422,7 +449,21 @@ snapshot guidance
 "#,
         );
 
-        let (allowed, specs) = collect_tool_specs(dir.path());
+        let config = Config {
+            gemini: crate::config::GeminiConfig {
+                api_key: "fake".to_string(),
+                model: "fake".to_string(),
+            },
+            discord: crate::config::DiscordConfig {
+                token: "fake".to_string(),
+                guild_id: None,
+                channel_mappings: None,
+            },
+            runtime: crate::config::RuntimeConfig::default(),
+            guardian: None,
+        };
+
+        let (allowed, specs) = collect_tool_specs(dir.path(), &config, "看下 TSLA.US 的股价");
         assert!(allowed.contains("ls"));
         assert!(allowed.contains("send_attachment"));
         assert!(allowed.contains("stock_quote"));
@@ -437,5 +478,41 @@ snapshot guidance
             .unwrap()
             .iter()
             .any(|entry| entry["name"] == "stock_quote"));
+    }
+
+    #[test]
+    fn test_collect_tool_specs_limits_host_path_requests_to_host_capable_tools() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            gemini: crate::config::GeminiConfig {
+                api_key: "fake".to_string(),
+                model: "fake".to_string(),
+            },
+            discord: crate::config::DiscordConfig {
+                token: "fake".to_string(),
+                guild_id: None,
+                channel_mappings: None,
+            },
+            runtime: crate::config::RuntimeConfig {
+                max_turns: 16,
+                read_only_budget: 4,
+                max_tool_output_bytes: 5000,
+                privileged: true,
+                exec_mode: crate::config::ExecMode::Unrestricted,
+            },
+            guardian: None,
+        };
+
+        let (allowed, specs) =
+            collect_tool_specs(dir.path(), &config, "找到 /root/process_intel.py 文件，并且发给我");
+        assert!(allowed.contains("exec"));
+        assert!(allowed.contains("send_attachment"));
+        assert!(!allowed.contains("find"));
+        assert!(!allowed.contains("ls"));
+        assert!(specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| matches!(entry["name"].as_str(), Some("exec" | "send_attachment" | "send_attachments"))));
     }
 }
