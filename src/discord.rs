@@ -394,14 +394,13 @@ pub fn resolve_folder_by_id(workspace_path: &Path, channel_id: &str) -> Option<S
     } else {
         channel_id
     };
-    let anchor = format!("({})", suffix);
-    
+
     let channels_dir = workspace_path.join("channels");
     if let Ok(entries) = fs::read_dir(channels_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(&anchor) {
+                    if extract_id_from_folder(name).as_deref() == Some(suffix) {
                         return Some(name.to_string());
                     }
                 }
@@ -642,7 +641,7 @@ pub async fn broadcast_typing(token: &str, channel_id: &str) -> anyhow::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::split_message_chunks;
+    use super::{extract_id_from_folder, split_message_chunks, to_folder_name};
 
     #[test]
     fn test_split_message_chunks_prefers_newline_boundaries() {
@@ -659,16 +658,32 @@ mod tests {
 
         assert_eq!(chunks, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
     }
+
+    #[test]
+    fn test_extract_id_from_folder_supports_legacy_and_current_formats() {
+        assert_eq!(extract_id_from_folder("General (123456)"), Some("123456".to_string()));
+        assert_eq!(extract_id_from_folder("general-123456"), Some("123456".to_string()));
+    }
+
+    #[test]
+    fn test_to_folder_name_uses_dash_suffix_format() {
+        assert_eq!(to_folder_name("general", "123456789"), "general-456789");
+    }
 }
 
 
 
 
 
-/// Helper to extract raw Discord Channel ID from a folder name (e.g. "General (123456)")
+/// Helper to extract the stored channel-id suffix from a folder name.
+/// Supports both legacy `name (123456)` and current `name-123456`.
 pub fn extract_id_from_folder(folder_name: &str) -> Option<String> {
-    let re = regex::Regex::new(r"\((\d+)\)$").ok()?;
-    re.captures(folder_name).and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+    let re = regex::Regex::new(r"(?:\((\d+)\)|-(\d+))$").ok()?;
+    let captures = re.captures(folder_name)?;
+    captures
+        .get(1)
+        .or_else(|| captures.get(2))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Helper to fetch channels on startup (adapter for serenity)
@@ -780,8 +795,9 @@ pub async fn sync_all_discord_events(base_path: &Path, _mappings: Option<Arc<RwL
     Ok(())
 }
 
-/// Helper to generate collision-resistant folder names
+/// Helper to generate collision-resistant folder names.
+/// Uses a short id suffix so folders stay readable but stable across renames.
 pub fn to_folder_name(name: &str, id: &str) -> String {
     let suffix = &id[id.len().saturating_sub(6)..];
-    format!("{} ({})", name, suffix)
+    format!("{}-{}", name, suffix)
 }
