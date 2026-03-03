@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::context::{extract_and_load_images, load_unified_prompt, parse_task_document};
 use crate::discord;
 use crate::llm;
-use crate::router::{extract_trigger_message, plan_conversational_request, PlanStep, RequestRoute};
+use crate::router::{collect_pending_workset, plan_conversational_request, PlanStep, RequestRoute};
 use crate::skills::{build_relevant_skill_guidance, has_explicit_skill_match};
 use crate::tools::dispatch_tool;
 use regex::Regex;
@@ -215,6 +215,7 @@ find/ls/grep/read. Only fall back to local cognition tools if the named skill ca
         config,
         channel_id,
         &system_prompt_str,
+        true,
     )
     .await
 }
@@ -241,12 +242,16 @@ pub(crate) async fn run_conversational_loop(
         channel_memory
     ));
 
-    let mut trigger_instruction = extract_trigger_message(full_context, trigger_id.as_deref());
-    if let Some(id) = trigger_id.clone() {
-        trigger_instruction.push_str(&format!("\nSpecifically, the trigger message has ID: {}.", id));
+    let workset = collect_pending_workset(full_context, trigger_id.as_deref());
+    let workset_trimmed = workset.trim();
+    if workset_trimmed.is_empty() {
+        return Ok(
+            "I did not find any new user request content to process beyond the wake signal."
+                .to_string(),
+        );
     }
 
-    let routed = match plan_conversational_request(base_path, config, &trigger_instruction).await {
+    let routed = match plan_conversational_request(base_path, config, workset_trimmed).await {
         Ok(route) => route,
         Err(err) => {
             eprintln!("⚠️ Conversational router failed, falling back to agent loop: {}", err);
@@ -261,13 +266,13 @@ pub(crate) async fn run_conversational_loop(
             config,
             channel_id,
             &system_prompt_str,
-            &trigger_instruction,
+            workset_trimmed,
         )
         .await;
     }
 
-    let explicit_skill_match = has_explicit_skill_match(base_path, &trigger_instruction);
-    if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, &trigger_instruction) {
+    let explicit_skill_match = has_explicit_skill_match(base_path, workset_trimmed);
+    if let Some(skill_guidance) = build_relevant_skill_guidance(base_path, workset_trimmed) {
         system_prompt_str.push_str("\n\n");
         system_prompt_str.push_str(&skill_guidance);
     }
@@ -282,11 +287,11 @@ pub(crate) async fn run_conversational_loop(
         role: llm::MessageRole::User,
         parts: vec![llm::MultimodalPart::text(format!(
             "### Current User Input (Specific Target):\n{}\n\n{}",
-            trigger_instruction, response_instruction
+            workset_trimmed, response_instruction
         ))],
     }];
 
-    if let Some(note) = unsupported_request_note(&trigger_instruction, config) {
+    if let Some(note) = unsupported_request_note(workset_trimmed, config) {
         initial_messages.push(llm::Message {
             role: llm::MessageRole::User,
             parts: vec![llm::MultimodalPart::text(note)],
@@ -305,6 +310,7 @@ pub(crate) async fn run_conversational_loop(
         config,
         channel_id,
         &system_prompt_str,
+        false,
     )
     .await
 }

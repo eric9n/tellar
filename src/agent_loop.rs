@@ -23,6 +23,7 @@ pub async fn run_agent_loop(
     config: &Config,
     channel_id: &str,
     system_prompt: &str,
+    enable_steering: bool,
 ) -> anyhow::Result<String> {
     let tools = get_tool_definitions(base_path, config);
     let mut messages = initial_messages;
@@ -34,7 +35,9 @@ pub async fn run_agent_loop(
         turn += 1;
         println!("🧠 Turn {}/{}: Reasoning...", turn, max_turns);
 
-        update_history_with_steering(&mut messages, path).await?;
+        if enable_steering {
+            update_history_with_steering(&mut messages, path).await?;
+        }
 
         let turn_result = llm::generate_turn(
             system_prompt,
