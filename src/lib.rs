@@ -9,6 +9,7 @@ pub mod context;
 pub mod agent_loop;
 pub mod delivery;
 pub mod llm;
+pub mod router;
 pub mod session;
 pub mod steward;
 pub mod thread_runtime;
