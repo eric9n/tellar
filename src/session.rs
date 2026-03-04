@@ -1,100 +1,154 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
  * File Path: src/session.rs
- * Responsibility: Assemble role sessions from prompts, memory, and multimodal context.
+ * Responsibility: Orchestrate task routing and finite plan execution for ritual and conversational work.
  */
 
-use crate::agent_loop::run_agent_loop;
 use crate::config::Config;
-use crate::conversation_context::{
-    build_conversational_agent_context, build_react_prompt_context,
+use crate::execution_contract::{
+    ConversationalLoopOutcome, ConversationalLoopState, ExecutionOutcome, RequestRoute,
 };
-use crate::context::load_unified_prompt;
-use crate::input::collect_pending_workset;
-use crate::plan_executor::execute_conversational_route;
-use crate::router::{plan_conversational_request, RequestRoute};
+use crate::input::{Workset, collect_pending_workset};
+use crate::plan_executor::{PlanExecutionContext, execute_conversational_route};
+use crate::prompt_context::load_unified_prompt;
+use crate::router::plan_conversational_request;
+use crate::task_policy::apply_request_route_policy;
+use crate::task_response::no_new_workset_response;
 use std::path::Path;
 
-pub(crate) async fn run_react_loop(
-    task: &str,
-    full_context: &str,
-    path: &Path,
+async fn resolve_task_route(
+    base_path: &Path,
+    config: &Config,
+    workset: &Workset,
+    execution_label: &str,
+    fallback_prompt: &str,
+) -> RequestRoute {
+    let policy_decision = apply_request_route_policy(
+        match plan_conversational_request(base_path, config, workset).await {
+            Ok(route) => route,
+            Err(err) => {
+                eprintln!(
+                    "⚠️ {} router failed, returning clarification request: {}",
+                    execution_label, err
+                );
+                RequestRoute::NeedsInput {
+                    fields: Vec::new(),
+                    prompt: Some(fallback_prompt.to_string()),
+                }
+            }
+        },
+    );
+
+    if let Some(note) = policy_decision.log_note() {
+        eprintln!("🧭 {} routing note: {}", execution_label, note);
+    }
+
+    policy_decision.route
+}
+
+async fn execute_task_route(
+    workset: &Workset,
     base_path: &Path,
     config: &Config,
     channel_id: &str,
-) -> anyhow::Result<String> {
-    let mut system_prompt_str = load_unified_prompt(base_path, channel_id);
-    let initial_messages =
-        build_react_prompt_context(&mut system_prompt_str, task, full_context, path, base_path, config);
+    system_prompt: &str,
+    execution_label: &str,
+    route: RequestRoute,
+) -> anyhow::Result<ExecutionOutcome> {
+    let outcome = execute_conversational_route(
+        route.into_executable(),
+        PlanExecutionContext {
+            workset,
+            base_path,
+            config,
+            channel_id,
+            system_prompt,
+        },
+    )
+    .await?;
 
-    run_agent_loop(
-        initial_messages,
-        path,
+    eprintln!(
+        "🧭 {} plan executed: final_state={} success={} {}",
+        execution_label,
+        outcome.final_state.label(),
+        outcome.is_terminal_success(),
+        outcome.trace.summarize()
+    );
+
+    Ok(outcome)
+}
+
+pub(crate) async fn execute_ritual_step(
+    task: &str,
+    _full_context: &str,
+    _path: &Path,
+    base_path: &Path,
+    config: &Config,
+    channel_id: &str,
+) -> anyhow::Result<ExecutionOutcome> {
+    let system_prompt_str = load_unified_prompt(base_path, channel_id);
+    let ritual_workset = Workset::new(vec![task.to_string()]);
+    let route = resolve_task_route(
+        base_path,
+        config,
+        &ritual_workset,
+        "Ritual",
+        "This ritual step is not ready to execute. Provide the exact target or missing inputs.",
+    )
+    .await;
+
+    execute_task_route(
+        &ritual_workset,
         base_path,
         config,
         channel_id,
         &system_prompt_str,
-        true,
+        "Ritual",
+        route,
     )
     .await
 }
 
 pub(crate) async fn run_conversational_loop(
     full_context: &str,
-    path: &Path,
+    _path: &Path,
     base_path: &Path,
     config: &Config,
     trigger_id: Option<String>,
     channel_id: &str,
-) -> anyhow::Result<String> {
-    let mut system_prompt_str = load_unified_prompt(base_path, channel_id);
-
+) -> anyhow::Result<ConversationalLoopOutcome> {
     let workset = collect_pending_workset(full_context, trigger_id.as_deref());
     if workset.is_empty() {
-        return Ok(
-            "I did not find any new user request content to process beyond the wake signal."
-                .to_string(),
-        );
+        return Ok(ConversationalLoopOutcome {
+            user_response: no_new_workset_response(),
+            state: ConversationalLoopState::NoNewWorkset,
+            trace: None,
+        });
     }
-    let workset_text = workset.text();
-    let workset_trimmed = workset_text.trim();
 
-    let routed = match plan_conversational_request(base_path, config, &workset).await {
-        Ok(route) => route,
-        Err(err) => {
-            eprintln!("⚠️ Conversational router failed, falling back to agent loop: {}", err);
-            RequestRoute::Agent
-        }
-    };
-
-    if !matches!(routed, RequestRoute::Agent) {
-        return execute_conversational_route(
-            routed,
-            base_path,
-            config,
-            channel_id,
-            &system_prompt_str,
-            workset_trimmed,
-        )
-        .await;
-    }
-    let initial_messages = build_conversational_agent_context(
-        &mut system_prompt_str,
-        workset_trimmed,
-        full_context,
-        path,
+    let system_prompt_str = load_unified_prompt(base_path, channel_id);
+    let route = resolve_task_route(
         base_path,
         config,
-    );
-
-    run_agent_loop(
-        initial_messages,
-        path,
+        &workset,
+        "Conversational",
+        "This task is not ready to execute. Provide the exact target or missing inputs.",
+    )
+    .await;
+    let outcome = execute_task_route(
+        &workset,
         base_path,
         config,
         channel_id,
         &system_prompt_str,
-        false,
+        "Conversational",
+        route,
     )
-    .await
+    .await?;
+
+    Ok(ConversationalLoopOutcome {
+        user_response: outcome.user_response,
+        state: ConversationalLoopState::Planned(outcome.final_state),
+        trace: Some(outcome.trace.view()),
+    })
 }

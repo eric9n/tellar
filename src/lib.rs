@@ -5,28 +5,29 @@
  */
 
 pub mod config;
-pub mod conversation_context;
-pub mod conversation_policy;
-pub mod input;
-pub mod context;
-pub mod agent_loop;
 pub mod delivery;
+pub mod discord;
+pub mod execution_contract;
+pub mod input;
 pub mod llm;
 pub mod plan_executor;
-pub mod router;
-pub mod session;
-pub mod steward;
-pub mod thread_runtime;
-pub mod tools;
+pub mod prompt_context;
 pub mod rhythm;
-pub mod discord;
-pub mod guardian;
+pub mod router;
+pub mod routing_catalog;
+pub mod session;
 pub mod skills;
+pub mod task_policy;
+pub mod task_response;
+pub mod thread_doc;
+pub mod thread_runtime;
+pub mod thread_store;
+pub mod tools;
 pub mod watch;
 
-use std::path::{Path, PathBuf};
-use std::fs;
 use dirs::home_dir;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Returns the absolute default guild path: ~/.tellar/guild
 pub fn default_guild_path() -> PathBuf {
@@ -37,10 +38,13 @@ pub fn default_guild_path() -> PathBuf {
 }
 
 /// Create local channel folders based on Discord guild discovery
-pub fn mirror_guild_structure(base_path: &Path, channels: &std::collections::HashMap<String, String>) -> anyhow::Result<()> {
+pub fn mirror_guild_structure(
+    base_path: &Path,
+    channels: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
     for name in channels.values() {
         let channel_path = base_path.join("channels").join(name);
-        
+
         if !channel_path.exists() {
             let _ = fs::create_dir_all(&channel_path);
             println!("📂 Synchronized new channel folder: #{}", name);

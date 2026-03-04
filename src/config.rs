@@ -13,7 +13,6 @@ pub struct Config {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    pub guardian: Option<GuardianConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -51,12 +50,6 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct GuardianConfig {
-    pub model: Option<String>,
-}
-
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GeminiConfig {
     pub api_key: String,
     pub model: String,
@@ -75,8 +68,8 @@ impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file at {:?}", path.as_ref()))?;
-        let config: Config = serde_yaml::from_str(&content)
-            .context("Failed to parse config file")?;
+        let config: Config =
+            serde_yaml::from_str(&content).context("Failed to parse config file")?;
         Ok(config)
     }
 }

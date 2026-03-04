@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
-use serde_json::json;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 static POOLED_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -16,8 +16,9 @@ pub enum MessageRole {
     System,
     User,
     Assistant,
-    #[serde(rename = "function")] // Gemini uses 'function' for tool results in some contexts, but 'model' for assistant. 
-    ToolResult,                   // We'll map this carefully in generate_multimodal.
+    #[serde(rename = "function")]
+    // Gemini uses 'function' for tool results in some contexts, but 'model' for assistant.
+    ToolResult, // We'll map this carefully in generate_multimodal.
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,7 +84,11 @@ fn parse_pseudo_function_call(raw: &str) -> Option<ToolCallRequest> {
     Some(ToolCallRequest {
         id: format!("{}_recovered", name),
         name,
-        args: if args.is_object() { args } else { json!({ "value": args }) },
+        args: if args.is_object() {
+            args
+        } else {
+            json!({ "value": args })
+        },
     })
 }
 
@@ -102,8 +107,7 @@ fn try_recover_malformed_function_call(res_json: &serde_json::Value) -> Option<M
     let recovered = parse_pseudo_function_call(call_source)?;
     Some(ModelTurn::ToolCalls {
         thought: Some(
-            "Recovered a malformed Gemini function call into a validated tool request."
-                .to_string(),
+            "Recovered a malformed Gemini function call into a validated tool request.".to_string(),
         ),
         calls: vec![recovered],
         parts: Vec::new(),
@@ -135,7 +139,7 @@ impl MultimodalPart {
             thought: None,
         }
     }
-    
+
     pub fn function_call(
         name: &str,
         args: serde_json::Value,
@@ -156,11 +160,7 @@ impl MultimodalPart {
         }
     }
 
-    pub fn function_response(
-        name: &str,
-        response: serde_json::Value,
-        id: Option<String>,
-    ) -> Self {
+    pub fn function_response(name: &str, response: serde_json::Value, id: Option<String>) -> Self {
         Self {
             text: None,
             inline_data: None,
@@ -191,18 +191,21 @@ pub async fn generate_turn(
     );
 
     // Map MessageRole to Gemini roles
-    let contents: Vec<serde_json::Value> = history.into_iter().map(|msg| {
-        let gemini_role = match msg.role {
-            MessageRole::User => "user",
-            MessageRole::Assistant => "model",
-            MessageRole::ToolResult => "user", // Strict Gemini 3/Vertex often prefers 'user' for function response turns
-            MessageRole::System => "user",         // System instructions are handled separately
-        };
-        json!({
-            "role": gemini_role,
-            "parts": msg.parts
+    let contents: Vec<serde_json::Value> = history
+        .into_iter()
+        .map(|msg| {
+            let gemini_role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "model",
+                MessageRole::ToolResult => "user", // Strict Gemini 3/Vertex often prefers 'user' for function response turns
+                MessageRole::System => "user",     // System instructions are handled separately
+            };
+            json!({
+                "role": gemini_role,
+                "parts": msg.parts
+            })
         })
-    }).collect();
+        .collect();
 
     let mut payload = json!({
         "systemInstruction": {
@@ -218,20 +221,28 @@ pub async fn generate_turn(
         payload["tools"] = t;
     }
 
-    let response = POOLED_CLIENT.post(url)
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+    let response = POOLED_CLIENT
+        .post(url)
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .json(&payload)
         .send()
         .await?;
 
     if !response.status().is_success() {
         let error_text = response.text().await?;
-        return Err(anyhow::anyhow!("Gemini API Error (Model: {}): {}", model, error_text));
+        return Err(anyhow::anyhow!(
+            "Gemini API Error (Model: {}): {}",
+            model,
+            error_text
+        ));
     }
 
     let res_json: serde_json::Value = response.json().await?;
     let parts = &res_json["candidates"][0]["content"]["parts"];
-    
+
     if parts.is_array() {
         let mut text_acc = String::new();
         let mut function_calls = Vec::new();
@@ -255,7 +266,8 @@ pub async fn generate_turn(
                 calls.push(ToolCallRequest {
                     id: raw_id.unwrap_or(fallback_id),
                     name,
-                    args: call["args"].as_object()
+                    args: call["args"]
+                        .as_object()
                         .map(|_| call["args"].clone())
                         .unwrap_or_else(|| json!({})),
                 });
@@ -267,8 +279,8 @@ pub async fn generate_turn(
                 Some(text_acc.trim().to_string())
             };
 
-            let raw_parts: Vec<MultimodalPart> = serde_json::from_value(parts.clone())
-                .unwrap_or_else(|_| Vec::new());
+            let raw_parts: Vec<MultimodalPart> =
+                serde_json::from_value(parts.clone()).unwrap_or_else(|_| Vec::new());
 
             return Ok(ModelTurn::ToolCalls {
                 thought,
@@ -288,11 +300,18 @@ pub async fn generate_turn(
     }
 
     // Fallback if no text or function call was found
-    let reason = res_json["candidates"][0]["finishReason"].as_str().unwrap_or("UNKNOWN");
+    let reason = res_json["candidates"][0]["finishReason"]
+        .as_str()
+        .unwrap_or("UNKNOWN");
     let msg = if reason == "SAFETY" {
-        format!("Gemini blocked the response due to SAFETY filters. Check your prompt or history context.")
+        format!(
+            "Gemini blocked the response due to SAFETY filters. Check your prompt or history context."
+        )
     } else {
-        format!("Gemini returned no content. Finish Reason: {}. Response: {}", reason, res_json)
+        format!(
+            "Gemini returned no content. Finish Reason: {}. Response: {}",
+            reason, res_json
+        )
     };
     eprintln!("🔴 [LLM ERROR] {}", msg);
     Err(anyhow::anyhow!(msg))
@@ -305,8 +324,12 @@ pub async fn list_models(api_key: &str) -> anyhow::Result<Vec<String>> {
         api_key
     );
 
-    let response = POOLED_CLIENT.get(url)
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+    let response = POOLED_CLIENT
+        .get(url)
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .send()
         .await?;
 
@@ -316,27 +339,29 @@ pub async fn list_models(api_key: &str) -> anyhow::Result<Vec<String>> {
     }
 
     let res_json: serde_json::Value = response.json().await?;
-    
+
     let mut models = Vec::new();
     if let Some(list) = res_json["models"].as_array() {
         for m in list {
             if let Some(name) = m["name"].as_str() {
                 // Return short name (e.g. models/gemini-pro -> gemini-pro)
                 let short_name = name.strip_prefix("models/").unwrap_or(name);
-                
+
                 // Filter for models that support generateContent
                 if let Some(methods) = m["supportedGenerationMethods"].as_array() {
-                    if methods.iter().any(|v| v.as_str() == Some("generateContent")) {
+                    if methods
+                        .iter()
+                        .any(|v| v.as_str() == Some("generateContent"))
+                    {
                         models.push(short_name.to_string());
                     }
                 }
             }
         }
     }
-    
+
     Ok(models)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -349,10 +374,10 @@ mod tests {
             "test_tool",
             json!({ "arg1": "val1" }),
             Some("fake-signature".to_string()),
-            Some("tool-1".to_string())
+            Some("tool-1".to_string()),
         );
         let serialized = serde_json::to_value(&part).unwrap();
-        
+
         assert_eq!(serialized["functionCall"]["name"], "test_tool");
         assert_eq!(serialized["functionCall"]["id"], "tool-1");
         assert_eq!(serialized["thoughtSignature"], "fake-signature");
@@ -369,7 +394,7 @@ mod tests {
             "thoughtSignature": "fake-signature"
         });
         let part: MultimodalPart = serde_json::from_value(data).unwrap();
-        
+
         assert_eq!(part.thought_signature, Some("fake-signature".to_string()));
         assert_eq!(part.function_call.as_ref().unwrap()["id"], "tool-1");
     }
@@ -381,10 +406,13 @@ mod tests {
             { "thoughtSignature": "sig123" },
             { "functionCall": { "name": "sh", "args": { "command": "ls" } } }
         ]);
-        
-        let thought_signature = parts.as_array().unwrap().iter()
+
+        let thought_signature = parts
+            .as_array()
+            .unwrap()
+            .iter()
             .find_map(|p| p["thoughtSignature"].as_str());
-            
+
         assert_eq!(thought_signature, Some("sig123"));
     }
 

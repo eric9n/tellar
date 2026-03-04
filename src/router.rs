@@ -1,39 +1,42 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
  * File Path: src/router.rs
- * Responsibility: LLM-backed conversational routing before the agent loop.
+ * Responsibility: LLM-backed task routing that converts requests into deterministic execution paths,
+ * then validates the structured routing decision.
  */
 
 use crate::config::Config;
+use crate::execution_contract::{
+    ExecutionPlan, PlanConfidence, PlanIntent, PlanStep, RequestRoute, ResponseStyle, ToolCallSpec,
+};
 use crate::input::Workset;
 use crate::llm;
-use crate::tools::get_routing_tool_definitions;
-use anyhow::{bail, Context, Result};
+use crate::routing_catalog::collect_routing_tool_catalog;
+use anyhow::{Context, Result, bail};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum PlanStep {
-    CallTool { tool_name: String, args: Value },
-    Respond { instruction: String },
-    AskForMissing { prompt: String },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum RequestRoute {
-    PlanAndExecute { steps: Vec<PlanStep> },
-    Reject { reason: String },
-    Agent,
-}
+static FENCED_JSON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```").expect("valid fenced json regex")
+});
 
 #[derive(Debug, Deserialize)]
 struct RouteDecision {
     route: String,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    fields: Vec<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
     #[serde(default)]
     steps: Vec<RouteDecisionStep>,
 }
@@ -48,7 +51,11 @@ struct RouteDecisionStep {
     #[serde(default)]
     instruction: Option<String>,
     #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    fields: Vec<String>,
 }
 
 fn extract_json_object(raw: &str) -> Result<String> {
@@ -57,54 +64,13 @@ fn extract_json_object(raw: &str) -> Result<String> {
         return Ok(trimmed.to_string());
     }
 
-    let fenced = Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```")
-        .expect("valid fenced json regex");
-    if let Some(caps) = fenced.captures(trimmed) {
+    if let Some(caps) = FENCED_JSON_RE.captures(trimmed) {
         if let Some(body) = caps.get(1) {
             return Ok(body.as_str().trim().to_string());
         }
     }
 
     bail!("model output did not contain a JSON object")
-}
-
-fn has_host_absolute_path(text: &str) -> bool {
-    let host_path = Regex::new(r#"(^|[\s`'"(])/(?:[^/\s]+/)*[^/\s]+"#).expect("valid host path regex");
-    host_path.is_match(text)
-}
-
-fn collect_tool_specs(base_path: &Path, config: &Config, text: &str) -> (HashSet<String>, Value) {
-    let mut tool_specs = get_routing_tool_definitions(base_path);
-    if has_host_absolute_path(text) {
-        let allowed_host_tools = if config.runtime.privileged {
-            ["exec", "send_attachment", "send_attachments"]
-        } else {
-            ["exec", "send_attachment", "send_attachments"]
-        };
-        let filtered = tool_specs
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                entry.get("name")
-                    .and_then(Value::as_str)
-                    .map(|name| allowed_host_tools.contains(&name))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        tool_specs = Value::Array(filtered);
-    }
-
-    let allowed_tools = tool_specs
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
-        .map(ToString::to_string)
-        .collect::<HashSet<_>>();
-
-    (allowed_tools, tool_specs)
 }
 
 fn validate_tool_args(raw: Option<Value>) -> Value {
@@ -115,27 +81,105 @@ fn validate_tool_args(raw: Option<Value>) -> Value {
     }
 }
 
+fn infer_plan_intent(steps: &[PlanStep]) -> PlanIntent {
+    let has_tool = steps
+        .iter()
+        .any(|step| matches!(step, PlanStep::CallTool { .. }));
+    let has_respond = steps
+        .iter()
+        .any(|step| matches!(step, PlanStep::Respond { .. }));
+    let has_missing = steps
+        .iter()
+        .any(|step| matches!(step, PlanStep::AskForMissing { .. }));
+
+    if has_missing && !has_tool && !has_respond {
+        PlanIntent::MissingInputCollection
+    } else if has_tool && has_respond {
+        PlanIntent::ToolExecutionWithResponse
+    } else if has_tool {
+        PlanIntent::ToolExecution
+    } else {
+        PlanIntent::DirectResponse
+    }
+}
+
+fn parse_plan_intent(raw: Option<String>, steps: &[PlanStep]) -> Result<PlanIntent> {
+    let Some(value) = raw else {
+        return Ok(infer_plan_intent(steps));
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "direct_response" | "direct-response" | "direct" => Ok(PlanIntent::DirectResponse),
+        "tool_execution" | "tool-execution" | "tool" => Ok(PlanIntent::ToolExecution),
+        "tool_execution_with_response"
+        | "tool-execution-with-response"
+        | "tool_with_response"
+        | "tool-with-response" => Ok(PlanIntent::ToolExecutionWithResponse),
+        "missing_input_collection"
+        | "missing-input-collection"
+        | "ask_for_missing"
+        | "ask-for-missing"
+        | "missing" => Ok(PlanIntent::MissingInputCollection),
+        other => bail!("unsupported plan intent `{}`", other),
+    }
+}
+
+fn parse_plan_confidence(raw: Option<String>) -> Result<PlanConfidence> {
+    let Some(value) = raw else {
+        return Ok(PlanConfidence::High);
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "high" => Ok(PlanConfidence::High),
+        "medium" => Ok(PlanConfidence::Medium),
+        "low" => Ok(PlanConfidence::Low),
+        other => bail!("unsupported plan confidence `{}`", other),
+    }
+}
+
 fn validate_route_decision(
     decision: RouteDecision,
     allowed_tools: &HashSet<String>,
 ) -> Result<RequestRoute> {
-    match decision.route.trim().to_ascii_lowercase().as_str() {
-        "agent" => Ok(RequestRoute::Agent),
+    let RouteDecision {
+        route,
+        reason,
+        prompt,
+        fields,
+        intent,
+        confidence,
+        steps: raw_steps,
+    } = decision;
+
+    match route.trim().to_ascii_lowercase().as_str() {
+        "needs_input" | "needsinput" | "clarify" => {
+            let prompt = prompt
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let fields = fields
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            if prompt.is_none() && fields.is_empty() {
+                bail!("needs_input route requires prompt or fields");
+            }
+            Ok(RequestRoute::NeedsInput { fields, prompt })
+        }
         "reject" => {
-            let reason = decision
-                .reason
+            let reason = reason
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .context("reject route requires a non-empty reason")?;
             Ok(RequestRoute::Reject { reason })
         }
         "plan" | "planandexecute" => {
-            if decision.steps.is_empty() {
+            if raw_steps.is_empty() {
                 bail!("plan route requires at least one step");
             }
 
-            let mut steps = Vec::with_capacity(decision.steps.len());
-            for step in decision.steps {
+            let mut steps = Vec::with_capacity(raw_steps.len());
+            for step in raw_steps {
                 let kind = step.kind.trim().to_ascii_lowercase();
                 match kind.as_str() {
                     "calltool" | "call_tool" => {
@@ -148,34 +192,77 @@ fn validate_route_decision(
                             bail!("CallTool references unknown tool `{}`", tool_name);
                         }
                         steps.push(PlanStep::CallTool {
-                            tool_name,
-                            args: validate_tool_args(step.args),
+                            call: ToolCallSpec {
+                                tool_name,
+                                args: validate_tool_args(step.args),
+                            },
                         });
                     }
                     "respond" => {
-                        let instruction = step
+                        let guidance = step
                             .instruction
                             .map(|v| v.trim().to_string())
-                            .filter(|v| !v.is_empty())
-                            .context("Respond step requires instruction")?;
-                        steps.push(PlanStep::Respond { instruction });
+                            .filter(|v| !v.is_empty());
+                        let style = match step
+                            .style
+                            .as_deref()
+                            .unwrap_or("summary")
+                            .trim()
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            "direct" => ResponseStyle::Direct,
+                            "brief_commentary" | "brief-commentary" | "commentary" => {
+                                ResponseStyle::BriefCommentary
+                            }
+                            "summary" => ResponseStyle::Summary,
+                            other => bail!("unsupported respond style `{}`", other),
+                        };
+                        steps.push(PlanStep::Respond { style, guidance });
                     }
                     "askformissing" | "ask_for_missing" => {
                         let prompt = step
                             .prompt
                             .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty());
+                        let fields = step
+                            .fields
+                            .into_iter()
+                            .map(|v| v.trim().to_string())
                             .filter(|v| !v.is_empty())
-                            .context("AskForMissing step requires prompt")?;
-                        steps.push(PlanStep::AskForMissing { prompt });
+                            .collect::<Vec<_>>();
+                        if prompt.is_none() && fields.is_empty() {
+                            bail!("AskForMissing step requires prompt or fields");
+                        }
+                        steps.push(PlanStep::AskForMissing { fields, prompt });
                     }
                     other => bail!("unsupported plan step kind `{}`", other),
                 }
             }
 
-            Ok(RequestRoute::PlanAndExecute { steps })
+            let intent = parse_plan_intent(intent, &steps)?;
+            let confidence = parse_plan_confidence(confidence)?;
+
+            Ok(RequestRoute::PlanAndExecute {
+                plan: ExecutionPlan {
+                    intent,
+                    confidence,
+                    steps,
+                },
+            })
         }
         other => bail!("unsupported route `{}`", other),
     }
+}
+
+pub(crate) fn parse_route_decision(
+    narrative: &str,
+    allowed_tools: &HashSet<String>,
+) -> Result<RequestRoute> {
+    let json_payload = extract_json_object(narrative)?;
+    let decision: RouteDecision = serde_json::from_str(&json_payload)
+        .with_context(|| format!("invalid router JSON: {}", json_payload))?;
+    validate_route_decision(decision, allowed_tools)
 }
 
 pub(crate) async fn plan_conversational_request(
@@ -184,30 +271,41 @@ pub(crate) async fn plan_conversational_request(
     workset: &Workset,
 ) -> Result<RequestRoute> {
     let text = workset.text();
-    let (allowed_tools, tool_specs) = collect_tool_specs(base_path, config, &text);
+    let catalog = collect_routing_tool_catalog(base_path, config, &text);
+    let allowed_tools = &catalog.allowed_tools;
 
     let routing_prompt = format!(
-        "You are Tellar's conversational router. Return exactly one JSON object and nothing else.\n\
+        "You are Tellar's task router. Return exactly one JSON object and nothing else.\n\
+Your job is to identify the user's task intent, decide whether the task is executable, and produce the narrowest safe route.\n\
+Tellar is a task processor, not a chat companion. Do not optimize for conversational variety. Optimize for precise execution.\n\
 Classify the user request into one of three routes:\n\
 - \"plan\": for high-confidence deterministic handling using a finite plan\n\
+- \"needs_input\": when the request seems feasible but required inputs or scope are missing\n\
 - \"reject\": for clearly unsupported requests that should be declined directly\n\
-- \"agent\": for ambiguous, open-ended, or exploratory requests that should go to the general agent loop\n\n\
+\n\
 When route is \"plan\", every step must be one of:\n\
 - CallTool: requires tool_name and args (args must be a JSON object)\n\
-- Respond: requires instruction\n\
-- AskForMissing: requires prompt\n\n\
+- Respond: optional style (direct | brief_commentary | summary), optional instruction\n\
+- AskForMissing: requires at least one of fields (array of missing field names) or prompt\n\n\
+When route is \"needs_input\", include at least one of:\n\
+- fields: array of missing field names\n\
+- prompt: a direct clarification question to the user\n\n\
 Rules:\n\
 - Use only tools from the catalog below.\n\
-- Prefer \"plan\" for explicit tool requests or clear, narrow requests that map cleanly to one tool.\n\
-- Use AskForMissing when a deterministic tool is implied but required inputs are missing.\n\
-- Use Respond for plain conversational replies or post-tool commentary.\n\
-- Use Reject only when the request clearly asks for unsupported real-time external data or another capability not present in the tool catalog.\n\
+- Prefer \"plan\" for explicit task requests or clear, narrow requests that map cleanly to one tool.\n\
+- Use \"needs_input\" when a deterministic tool is implied but required inputs are missing.\n\
+- Use Respond only for final task output or concise post-tool delivery.\n\
+- Use Reject only when the task cannot be completed with the available capabilities.\n\
 - If the request references an absolute host path such as /root/... or /var/..., do not choose guild-scoped file tools. Use only host-capable tools from the catalog.\n\
-- Use Agent when the request is genuinely ambiguous or requires exploration.\n\n\
+- If the request is too ambiguous to execute safely, prefer \"needs_input\" over \"reject\".\n\n\
+Optional plan metadata:\n\
+- intent: direct_response | tool_execution | tool_execution_with_response | missing_input_collection\n\
+- confidence: high | medium | low\n\
+- If omitted, the system will infer sensible defaults.\n\n\
 Tool catalog:\n{}\n\n\
 Output schema:\n\
-{{\"route\":\"plan|reject|agent\",\"reason\":\"... only for reject\",\"steps\":[{{\"kind\":\"CallTool|Respond|AskForMissing\",...}}]}}",
-        serde_json::to_string_pretty(&tool_specs).unwrap_or_else(|_| "[]".to_string())
+{{\"route\":\"plan|needs_input|reject\",\"intent\":\"... optional for plan\",\"confidence\":\"... optional for plan\",\"reason\":\"... only for reject\",\"prompt\":\"... for needs_input\",\"fields\":[\"...\"],\"steps\":[{{\"kind\":\"CallTool|Respond|AskForMissing\",...}}]}}",
+        catalog.rendered_specs
     );
 
     let user_prompt = format!("Route this request:\n{}", text);
@@ -230,85 +328,114 @@ Output schema:\n\
         llm::ModelTurn::ToolCalls { .. } => bail!("routing model attempted tool calls"),
     };
 
-    let json_payload = extract_json_object(&narrative)?;
-    let decision: RouteDecision = serde_json::from_str(&json_payload)
-        .with_context(|| format!("invalid router JSON: {}", json_payload))?;
-
-    validate_route_decision(decision, &allowed_tools)
+    parse_route_decision(&narrative, allowed_tools)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    fn write_skill(base: &Path, dir_name: &str, body: &str) {
-        let skill_dir = base.join("skills").join(dir_name);
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), body).unwrap();
-    }
 
     fn tool_set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|v| v.to_string()).collect()
     }
 
     #[test]
-    fn test_validate_route_decision_accepts_tool_plan() {
-        let decision = RouteDecision {
-            route: "plan".to_string(),
-            reason: None,
-            steps: vec![RouteDecisionStep {
-                kind: "CallTool".to_string(),
-                tool_name: Some("stock_quote".to_string()),
-                args: Some(json!({ "symbol": "TSLA.US" })),
-                instruction: None,
-                prompt: None,
-            }],
-        };
+    fn test_parse_route_decision_accepts_tool_plan() {
+        let route = parse_route_decision(
+            r#"{
+                "route":"plan",
+                "steps":[{"kind":"CallTool","tool_name":"stock_quote","args":{"symbol":"TSLA.US"}}]
+            }"#,
+            &tool_set(&["stock_quote"]),
+        )
+        .unwrap();
 
-        let route = validate_route_decision(decision, &tool_set(&["stock_quote"])).unwrap();
         match route {
-            RequestRoute::PlanAndExecute { steps } => {
-                assert_eq!(steps.len(), 1);
-                assert!(matches!(steps[0], PlanStep::CallTool { .. }));
+            RequestRoute::PlanAndExecute { plan } => {
+                assert_eq!(plan.steps.len(), 1);
+                assert_eq!(plan.intent, PlanIntent::ToolExecution);
+                assert_eq!(plan.confidence, PlanConfidence::High);
+                assert!(matches!(plan.steps[0], PlanStep::CallTool { .. }));
             }
             _ => panic!("expected plan route"),
         }
     }
 
     #[test]
-    fn test_validate_route_decision_accepts_ask_for_missing() {
-        let decision = RouteDecision {
-            route: "plan".to_string(),
-            reason: None,
-            steps: vec![RouteDecisionStep {
-                kind: "AskForMissing".to_string(),
-                tool_name: None,
-                args: None,
-                instruction: None,
-                prompt: Some("Need expiry".to_string()),
-            }],
-        };
+    fn test_parse_route_decision_accepts_ask_for_missing() {
+        let route = parse_route_decision(
+            r#"{
+                "route":"plan",
+                "steps":[{"kind":"AskForMissing","fields":["expiry"]}]
+            }"#,
+            &tool_set(&[]),
+        )
+        .unwrap();
 
-        let route = validate_route_decision(decision, &tool_set(&[])).unwrap();
         match route {
-            RequestRoute::PlanAndExecute { steps } => {
-                assert!(matches!(steps[0], PlanStep::AskForMissing { .. }));
+            RequestRoute::PlanAndExecute { plan } => {
+                assert_eq!(plan.intent, PlanIntent::MissingInputCollection);
+                assert!(matches!(plan.steps[0], PlanStep::AskForMissing { .. }));
             }
             _ => panic!("expected plan route"),
         }
     }
 
     #[test]
-    fn test_validate_route_decision_accepts_reject() {
-        let decision = RouteDecision {
-            route: "reject".to_string(),
-            reason: Some("No weather tool".to_string()),
-            steps: vec![],
-        };
+    fn test_parse_route_decision_accepts_structured_respond() {
+        let route = parse_route_decision(
+            r#"{
+                "route":"plan",
+                "steps":[{"kind":"Respond","style":"brief_commentary","instruction":"Keep it short"}]
+            }"#,
+            &tool_set(&[]),
+        )
+        .unwrap();
 
-        let route = validate_route_decision(decision, &tool_set(&[])).unwrap();
+        match route {
+            RequestRoute::PlanAndExecute { plan } => {
+                assert_eq!(plan.intent, PlanIntent::DirectResponse);
+                assert!(matches!(
+                    plan.steps[0],
+                    PlanStep::Respond {
+                        style: ResponseStyle::BriefCommentary,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected plan route"),
+        }
+    }
+
+    #[test]
+    fn test_parse_route_decision_accepts_needs_input_route() {
+        let route = parse_route_decision(
+            r#"{
+                "route":"needs_input",
+                "fields":["symbol"],
+                "prompt":"Which symbol should I use?"
+            }"#,
+            &tool_set(&[]),
+        )
+        .unwrap();
+
+        match route {
+            RequestRoute::NeedsInput { fields, prompt } => {
+                assert_eq!(fields, vec!["symbol".to_string()]);
+                assert_eq!(prompt.as_deref(), Some("Which symbol should I use?"));
+            }
+            _ => panic!("expected needs_input route"),
+        }
+    }
+
+    #[test]
+    fn test_parse_route_decision_accepts_reject() {
+        let route = parse_route_decision(
+            r#"{"route":"reject","reason":"No weather tool"}"#,
+            &tool_set(&[]),
+        )
+        .unwrap();
+
         match route {
             RequestRoute::Reject { reason } => assert!(reason.contains("weather")),
             _ => panic!("expected reject route"),
@@ -316,105 +443,42 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_route_decision_rejects_unknown_tool() {
-        let decision = RouteDecision {
-            route: "plan".to_string(),
-            reason: None,
-            steps: vec![RouteDecisionStep {
-                kind: "CallTool".to_string(),
-                tool_name: Some("unknown_tool".to_string()),
-                args: Some(json!({})),
-                instruction: None,
-                prompt: None,
-            }],
-        };
-
-        assert!(validate_route_decision(decision, &tool_set(&["stock_quote"])).is_err());
-    }
-
-    #[test]
-    fn test_collect_tool_specs_reads_installed_skills() {
-        let dir = tempdir().unwrap();
-        write_skill(
-            dir.path(),
-            "snapshot",
-            r#"---
-name: snapshot
-tools:
-  stock_quote:
-    description: Quote
-    shell: ./snapshot.sh
-    parameters:
-      type: object
----
-snapshot guidance
-"#,
+    fn test_parse_route_decision_rejects_unknown_tool() {
+        assert!(
+            parse_route_decision(
+                r#"{
+                "route":"plan",
+                "steps":[{"kind":"CallTool","tool_name":"unknown_tool","args":{}}]
+            }"#,
+                &tool_set(&["stock_quote"]),
+            )
+            .is_err()
         );
-
-        let config = Config {
-            gemini: crate::config::GeminiConfig {
-                api_key: "fake".to_string(),
-                model: "fake".to_string(),
-            },
-            discord: crate::config::DiscordConfig {
-                token: "fake".to_string(),
-                guild_id: None,
-                channel_mappings: None,
-            },
-            runtime: crate::config::RuntimeConfig::default(),
-            guardian: None,
-        };
-
-        let (allowed, specs) = collect_tool_specs(dir.path(), &config, "看下 TSLA.US 的股价");
-        assert!(allowed.contains("ls"));
-        assert!(allowed.contains("send_attachment"));
-        assert!(allowed.contains("stock_quote"));
-        assert!(specs.as_array().unwrap().iter().any(|entry| entry["name"] == "ls"));
-        assert!(specs
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["name"] == "send_attachment"));
-        assert!(specs
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["name"] == "stock_quote"));
     }
 
     #[test]
-    fn test_collect_tool_specs_limits_host_path_requests_to_host_capable_tools() {
-        let dir = tempdir().unwrap();
-        let config = Config {
-            gemini: crate::config::GeminiConfig {
-                api_key: "fake".to_string(),
-                model: "fake".to_string(),
-            },
-            discord: crate::config::DiscordConfig {
-                token: "fake".to_string(),
-                guild_id: None,
-                channel_mappings: None,
-            },
-            runtime: crate::config::RuntimeConfig {
-                max_turns: 16,
-                read_only_budget: 4,
-                max_tool_output_bytes: 5000,
-                privileged: true,
-                exec_mode: crate::config::ExecMode::Unrestricted,
-            },
-            guardian: None,
-        };
+    fn test_parse_route_decision_accepts_explicit_plan_metadata() {
+        let route = parse_route_decision(
+            r#"{
+                "route":"plan",
+                "intent":"tool_execution_with_response",
+                "confidence":"medium",
+                "steps":[
+                    {"kind":"CallTool","tool_name":"stock_quote","args":{"symbol":"TSLA.US"}},
+                    {"kind":"Respond","style":"brief_commentary"}
+                ]
+            }"#,
+            &tool_set(&["stock_quote"]),
+        )
+        .unwrap();
 
-        let (allowed, specs) =
-            collect_tool_specs(dir.path(), &config, "找到 /root/process_intel.py 文件，并且发给我");
-        assert!(allowed.contains("exec"));
-        assert!(allowed.contains("send_attachment"));
-        assert!(!allowed.contains("find"));
-        assert!(!allowed.contains("ls"));
-        assert!(specs
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| matches!(entry["name"].as_str(), Some("exec" | "send_attachment" | "send_attachments"))));
+        match route {
+            RequestRoute::PlanAndExecute { plan } => {
+                assert_eq!(plan.intent, PlanIntent::ToolExecutionWithResponse);
+                assert_eq!(plan.confidence, PlanConfidence::Medium);
+                assert_eq!(plan.steps.len(), 2);
+            }
+            _ => panic!("expected plan route"),
+        }
     }
 }

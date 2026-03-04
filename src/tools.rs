@@ -6,9 +6,8 @@
 
 use crate::config::Config;
 use crate::delivery;
-use crate::llm;
 use crate::skills::{self, SkillMetadata};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -33,69 +32,10 @@ impl ToolExecutionResult {
             is_error: true,
         }
     }
-}
 
-pub(crate) const CORE_TOOL_NAMES: &[&str] = &["ls", "find", "grep", "read", "write", "edit"];
-
-#[derive(Default)]
-pub(crate) struct ToolBatchState {
-    pub(crate) last_call_signature: Option<String>,
-    pub(crate) last_observation_signature: Option<String>,
-    pub(crate) no_new_info_streak: usize,
-    pub(crate) repeated_error_streak: usize,
-}
-
-pub(crate) fn is_read_only_tool(name: &str) -> bool {
-    matches!(name, "ls" | "find" | "grep" | "read")
-}
-
-pub(crate) fn is_write_tool(name: &str) -> bool {
-    matches!(name, "write" | "edit") || delivery::DELIVERY_TOOL_NAMES.contains(&name)
-}
-
-pub(crate) fn tool_call_signature(call: &llm::ToolCallRequest) -> String {
-    format!(
-        "{}:{}",
-        call.name,
-        serde_json::to_string(&call.args).unwrap_or_else(|_| "{}".to_string())
-    )
-}
-
-pub(crate) fn tool_observation_signature(result: &ToolExecutionResult) -> String {
-    format!("{}:{}", result.is_error, result.output)
-}
-
-pub(crate) fn push_tool_result_message(
-    messages: &mut Vec<llm::Message>,
-    call: &llm::ToolCallRequest,
-    observation: &ToolExecutionResult,
-) {
-    let response_key = if observation.is_error { "error" } else { "output" };
-    messages.push(llm::Message {
-        role: llm::MessageRole::ToolResult,
-        parts: vec![llm::MultimodalPart::function_response(
-            &call.name,
-            json!({ response_key: observation.output }),
-            Some(call.id.clone()),
-        )],
-    });
-}
-
-pub(crate) fn push_system_note(messages: &mut Vec<llm::Message>, note: impl Into<String>) {
-    messages.push(llm::Message {
-        role: llm::MessageRole::User,
-        parts: vec![llm::MultimodalPart::text(format!("[System Note] {}", note.into()))],
-    });
-}
-
-pub(crate) fn skip_remaining_tool_calls(
-    messages: &mut Vec<llm::Message>,
-    calls: &[llm::ToolCallRequest],
-    start_index: usize,
-    reason: &str,
-) {
-    for call in calls.iter().skip(start_index) {
-        push_tool_result_message(messages, call, &ToolExecutionResult::error(reason.to_string()));
+    pub(crate) fn with_truncated_output(mut self, limit: usize) -> Self {
+        self.output = truncate_output(self.output, limit);
+        self
     }
 }
 
@@ -135,7 +75,45 @@ fn require_path_arg<'a>(args: &'a Value, field: &str) -> Result<&'a str, ToolExe
     args.get(field)
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
-        .ok_or_else(|| ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field)))
+        .ok_or_else(|| {
+            ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field))
+        })
+}
+
+fn require_string_arg<'a>(args: &'a Value, field: &str) -> Result<&'a str, ToolExecutionResult> {
+    args.get(field).and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field))
+    })
+}
+
+fn require_non_empty_string_arg<'a>(
+    args: &'a Value,
+    field: &str,
+) -> Result<&'a str, ToolExecutionResult> {
+    require_string_arg(args, field).and_then(|value| {
+        if value.is_empty() {
+            Err(ToolExecutionResult::error(format!(
+                "Error: Missing required argument `{}`.",
+                field
+            )))
+        } else {
+            Ok(value)
+        }
+    })
+}
+
+fn require_safe_rel_path<'a>(
+    args: &'a Value,
+    field: &str,
+    base_path: &Path,
+) -> Result<&'a str, ToolExecutionResult> {
+    let rel_path = normalize_path(require_path_arg(args, field)?);
+    if !is_path_safe(base_path, rel_path) {
+        return Err(ToolExecutionResult::error(
+            "Error: Access denied. Path must be within the guild directory.",
+        ));
+    }
+    Ok(rel_path)
 }
 
 fn optional_path_arg<'a>(args: &'a Value, field: &str, default: &'a str) -> &'a str {
@@ -143,6 +121,35 @@ fn optional_path_arg<'a>(args: &'a Value, field: &str, default: &'a str) -> &'a 
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
         .unwrap_or(default)
+}
+
+fn resolve_optional_target_path(
+    args: &Value,
+    field: &str,
+    default: &str,
+    base_path: &Path,
+) -> Result<(String, PathBuf), ToolExecutionResult> {
+    let rel_path = normalize_path(optional_path_arg(args, field, default)).to_string();
+    if !is_path_safe(base_path, &rel_path) {
+        return Err(ToolExecutionResult::error(
+            "Error: Access denied. Path must be within the guild directory.",
+        ));
+    }
+
+    let target = if rel_path == "." {
+        base_path.to_path_buf()
+    } else {
+        base_path.join(&rel_path)
+    };
+
+    if !target.exists() {
+        return Err(ToolExecutionResult::error(format!(
+            "Error: Path not found: {}",
+            rel_path
+        )));
+    }
+
+    Ok((rel_path, target))
 }
 
 fn collect_paths(
@@ -192,28 +199,30 @@ fn collect_paths(
 }
 
 pub(crate) fn run_ls_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
-    let rel_path = normalize_path(optional_path_arg(args, "path", "."));
-    if !is_path_safe(base_path, rel_path) {
-        return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-    }
+    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
 
-    let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
+    let recursive = args
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_depth = args.get("maxDepth").and_then(Value::as_u64).unwrap_or(2) as usize;
-    let target = if rel_path == "." { base_path.to_path_buf() } else { base_path.join(rel_path) };
-
-    if !target.exists() {
-        return ToolExecutionResult::error(format!("Error: Path not found: {}", rel_path));
-    }
 
     if target.is_file() {
         return match fs::metadata(&target) {
-            Ok(meta) => ToolExecutionResult::success(format!("FILE {} ({} bytes)", rel_path, meta.len())),
+            Ok(meta) => {
+                ToolExecutionResult::success(format!("FILE {} ({} bytes)", rel_path, meta.len()))
+            }
             Err(e) => ToolExecutionResult::error(format!("Error reading metadata: {}", e)),
         };
     }
 
     let mut paths = Vec::new();
-    if let Err(e) = collect_paths(base_path, &target, rel_path, recursive, max_depth, 0, &mut paths) {
+    if let Err(e) = collect_paths(
+        base_path, &target, &rel_path, recursive, max_depth, 0, &mut paths,
+    ) {
         return ToolExecutionResult::error(format!("Error listing path: {}", e));
     }
 
@@ -233,27 +242,30 @@ pub(crate) fn run_ls_tool(args: &Value, base_path: &Path) -> ToolExecutionResult
 }
 
 pub(crate) fn run_find_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
-    let name = match args.get("name").and_then(Value::as_str).filter(|v| !v.is_empty()) {
-        Some(value) => value,
-        None => return ToolExecutionResult::error("Error: Missing required argument `name`."),
+    let name = match require_non_empty_string_arg(args, "name") {
+        Ok(value) => value,
+        Err(err) => return err,
     };
-    let rel_path = normalize_path(optional_path_arg(args, "path", "."));
-    if !is_path_safe(base_path, rel_path) {
-        return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-    }
+    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
 
-    let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(true);
-    let case_sensitive = args.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
+    let recursive = args
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let case_sensitive = args
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_matches = args.get("maxMatches").and_then(Value::as_u64).unwrap_or(50) as usize;
     let max_depth = args.get("maxDepth").and_then(Value::as_u64).unwrap_or(8) as usize;
-    let target = if rel_path == "." { base_path.to_path_buf() } else { base_path.join(rel_path) };
-
-    if !target.exists() {
-        return ToolExecutionResult::error(format!("Error: Path not found: {}", rel_path));
-    }
 
     let mut paths = Vec::new();
-    if let Err(e) = collect_paths(base_path, &target, rel_path, recursive, max_depth, 0, &mut paths) {
+    if let Err(e) = collect_paths(
+        base_path, &target, &rel_path, recursive, max_depth, 0, &mut paths,
+    ) {
         return ToolExecutionResult::error(format!("Error scanning path: {}", e));
     }
 
@@ -290,26 +302,35 @@ pub(crate) fn run_find_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
 }
 
 pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
-    let pattern = match args.get("pattern").and_then(Value::as_str).filter(|v| !v.is_empty()) {
-        Some(value) => value,
-        None => return ToolExecutionResult::error("Error: Missing required argument `pattern`."),
+    let pattern = match require_non_empty_string_arg(args, "pattern") {
+        Ok(value) => value,
+        Err(err) => return err,
     };
-    let rel_path = normalize_path(optional_path_arg(args, "path", "."));
-    if !is_path_safe(base_path, rel_path) {
-        return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-    }
+    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
 
-    let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(true);
-    let case_sensitive = args.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
+    let recursive = args
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let case_sensitive = args
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_matches = args.get("maxMatches").and_then(Value::as_u64).unwrap_or(50) as usize;
-    let target = if rel_path == "." { base_path.to_path_buf() } else { base_path.join(rel_path) };
-
-    if !target.exists() {
-        return ToolExecutionResult::error(format!("Error: Path not found: {}", rel_path));
-    }
 
     let mut paths = Vec::new();
-    if let Err(e) = collect_paths(base_path, &target, rel_path, recursive, usize::MAX, 0, &mut paths) {
+    if let Err(e) = collect_paths(
+        base_path,
+        &target,
+        &rel_path,
+        recursive,
+        usize::MAX,
+        0,
+        &mut paths,
+    ) {
         return ToolExecutionResult::error(format!("Error scanning path: {}", e));
     }
 
@@ -448,9 +469,9 @@ pub(crate) fn core_tool_definitions() -> Vec<Value> {
 }
 
 async fn run_exec_tool(args: &Value, base_path: &Path, config: &Config) -> ToolExecutionResult {
-    let command = match args.get("command").and_then(Value::as_str).filter(|v| !v.is_empty()) {
-        Some(value) => value,
-        None => return ToolExecutionResult::error("Error: Missing required argument `command`."),
+    let command = match require_non_empty_string_arg(args, "command") {
+        Ok(value) => value,
+        Err(err) => return err,
     };
 
     if !config.runtime.privileged {
@@ -505,6 +526,104 @@ async fn run_exec_tool(args: &Value, base_path: &Path, config: &Config) -> ToolE
     }
 }
 
+fn run_read_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
+    let rel_path = match require_safe_rel_path(args, "path", base_path) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+
+    let offset = args["offset"].as_u64().unwrap_or(1) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(800) as usize;
+    if offset == 0 {
+        return ToolExecutionResult::error("Error: `offset` must be >= 1.");
+    }
+
+    let file_path = base_path.join(rel_path);
+    if !file_path.exists() {
+        return ToolExecutionResult::error(format!("Error: File not found: {}", rel_path));
+    }
+
+    match fs::read_to_string(&file_path) {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().collect();
+            if offset > lines.len() {
+                ToolExecutionResult::error(format!(
+                    "Error: offset {} is beyond file length {}",
+                    offset,
+                    lines.len()
+                ))
+            } else {
+                let end = std::cmp::min(offset - 1 + limit, lines.len());
+                ToolExecutionResult::success(lines[(offset - 1)..end].join("\n"))
+            }
+        }
+        Err(error) => ToolExecutionResult::error(format!("Error reading file: {}", error)),
+    }
+}
+
+fn run_write_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
+    let rel_path = match require_safe_rel_path(args, "path", base_path) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    let content = match require_string_arg(args, "content") {
+        Ok(content) => content,
+        Err(err) => return err,
+    };
+    let full_path = base_path.join(rel_path);
+
+    if let Some(parent) = full_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    match fs::write(&full_path, content) {
+        Ok(_) => ToolExecutionResult::success(format!("Successfully wrote to {}", rel_path)),
+        Err(error) => ToolExecutionResult::error(format!("Error writing file: {}", error)),
+    }
+}
+
+fn run_edit_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
+    let rel_path = match require_safe_rel_path(args, "path", base_path) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    let old_text = match require_non_empty_string_arg(args, "oldText") {
+        Ok(content) => content,
+        Err(err) => return err,
+    };
+    let new_text = match require_string_arg(args, "newText") {
+        Ok(content) => content,
+        Err(err) => return err,
+    };
+    let file_path = base_path.join(rel_path);
+
+    match fs::read_to_string(&file_path) {
+        Ok(content) => {
+            let occurrences: Vec<_> = content.matches(old_text).collect();
+            if occurrences.len() == 1 {
+                let new_content = content.replace(old_text, new_text);
+                match fs::write(&file_path, new_content) {
+                    Ok(_) => {
+                        ToolExecutionResult::success(format!("Successfully edited {}", rel_path))
+                    }
+                    Err(error) => {
+                        ToolExecutionResult::error(format!("Error writing file: {}", error))
+                    }
+                }
+            } else if occurrences.is_empty() {
+                ToolExecutionResult::error(format!("Error: oldText not found in {}", rel_path))
+            } else {
+                ToolExecutionResult::error(format!(
+                    "Error: oldText is not unique in {} (found {} occurrences)",
+                    rel_path,
+                    occurrences.len()
+                ))
+            }
+        }
+        Err(_) => ToolExecutionResult::error(format!("Error: File not found: {}", rel_path)),
+    }
+}
+
 pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
     let mut masked = text.to_string();
 
@@ -519,6 +638,49 @@ pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
     masked
 }
 
+async fn dispatch_skill_tool(
+    name: &str,
+    args: &Value,
+    base_path: &Path,
+    config: &Config,
+) -> Option<ToolExecutionResult> {
+    for (meta, dir) in SkillMetadata::discover_skills(base_path) {
+        if let Some(tool) = meta.tools.get(name) {
+            let result = match skills::execute_skill_tool(tool, &dir, base_path, args, config).await
+            {
+                Ok(output) => ToolExecutionResult::success(output),
+                Err(error) => ToolExecutionResult::error(format!(
+                    "Error executing skill tool `{}`: {}",
+                    name, error
+                )),
+            };
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+async fn dispatch_extension_tool(
+    name: &str,
+    args: &Value,
+    base_path: &Path,
+    config: &Config,
+    channel_id: &str,
+) -> ToolExecutionResult {
+    if let Some(result) =
+        delivery::dispatch_delivery_tool(name, args, base_path, config, channel_id).await
+    {
+        return result;
+    }
+
+    if let Some(result) = dispatch_skill_tool(name, args, base_path, config).await {
+        return result;
+    }
+
+    ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name))
+}
+
 pub(crate) async fn dispatch_tool(
     name: &str,
     args: &Value,
@@ -530,138 +692,14 @@ pub(crate) async fn dispatch_tool(
         "ls" => run_ls_tool(args, base_path),
         "find" => run_find_tool(args, base_path),
         "grep" => run_grep_tool(args, base_path),
-        "read" => {
-            let rel_path = match require_path_arg(args, "path") {
-                Ok(path) => normalize_path(path),
-                Err(err) => return err,
-            };
-            if !is_path_safe(base_path, rel_path) {
-                return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-            }
-
-            let offset = args["offset"].as_u64().unwrap_or(1) as usize;
-            let limit = args["limit"].as_u64().unwrap_or(800) as usize;
-            if offset == 0 {
-                return ToolExecutionResult::error("Error: `offset` must be >= 1.");
-            }
-
-            let file_path = base_path.join(rel_path);
-            if !file_path.exists() {
-                ToolExecutionResult::error(format!("Error: File not found: {}", rel_path))
-            } else {
-                match fs::read_to_string(&file_path) {
-                    Ok(content) => {
-                        let lines: Vec<&str> = content.lines().collect();
-                        if offset > lines.len() {
-                            ToolExecutionResult::error(format!(
-                                "Error: offset {} is beyond file length {}",
-                                offset,
-                                lines.len()
-                            ))
-                        } else {
-                            let end = std::cmp::min(offset - 1 + limit, lines.len());
-                            ToolExecutionResult::success(lines[(offset - 1)..end].join("\n"))
-                        }
-                    }
-                    Err(e) => ToolExecutionResult::error(format!("Error reading file: {}", e)),
-                }
-            }
-        }
-        "write" => {
-            let rel_path = match require_path_arg(args, "path") {
-                Ok(path) => normalize_path(path),
-                Err(err) => return err,
-            };
-            if !is_path_safe(base_path, rel_path) {
-                return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-            }
-
-            let content = match args.get("content").and_then(Value::as_str) {
-                Some(content) => content,
-                None => return ToolExecutionResult::error("Error: Missing required argument `content`."),
-            };
-            let full_path = base_path.join(rel_path);
-
-            if let Some(parent) = full_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-
-            match fs::write(&full_path, content) {
-                Ok(_) => ToolExecutionResult::success(format!("Successfully wrote to {}", rel_path)),
-                Err(e) => ToolExecutionResult::error(format!("Error writing file: {}", e)),
-            }
-        }
-        "edit" => {
-            let rel_path = match require_path_arg(args, "path") {
-                Ok(path) => normalize_path(path),
-                Err(err) => return err,
-            };
-            if !is_path_safe(base_path, rel_path) {
-                return ToolExecutionResult::error("Error: Access denied. Path must be within the guild directory.");
-            }
-
-            let old_text = match args.get("oldText").and_then(Value::as_str) {
-                Some(content) if !content.is_empty() => content,
-                _ => return ToolExecutionResult::error("Error: Missing required argument `oldText`."),
-            };
-            let new_text = match args.get("newText").and_then(Value::as_str) {
-                Some(content) => content,
-                None => return ToolExecutionResult::error("Error: Missing required argument `newText`."),
-            };
-
-            match fs::read_to_string(base_path.join(rel_path)) {
-                Ok(content) => {
-                    let occurrences: Vec<_> = content.matches(old_text).collect();
-                    if occurrences.len() == 1 {
-                        let new_content = content.replace(old_text, new_text);
-                        match fs::write(base_path.join(rel_path), new_content) {
-                            Ok(_) => ToolExecutionResult::success(format!("Successfully edited {}", rel_path)),
-                            Err(e) => ToolExecutionResult::error(format!("Error writing file: {}", e)),
-                        }
-                    } else if occurrences.is_empty() {
-                        ToolExecutionResult::error(format!("Error: oldText not found in {}", rel_path))
-                    } else {
-                        ToolExecutionResult::error(format!(
-                            "Error: oldText is not unique in {} (found {} occurrences)",
-                            rel_path,
-                            occurrences.len()
-                        ))
-                    }
-                }
-                Err(_e) => ToolExecutionResult::error(format!("Error: File not found: {}", rel_path)),
-            }
-        }
+        "read" => run_read_tool(args, base_path),
+        "write" => run_write_tool(args, base_path),
+        "edit" => run_edit_tool(args, base_path),
         "exec" => run_exec_tool(args, base_path, config).await,
-        _ => {
-            if let Some(delivery_out) =
-                delivery::dispatch_delivery_tool(name, args, base_path, config, channel_id).await
-            {
-                delivery_out
-            } else {
-                let skills = SkillMetadata::discover_skills(base_path);
-                let mut skill_out = ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name));
-                for (meta, dir) in skills {
-                    if let Some(tool) = meta.tools.get(name) {
-                        skill_out =
-                            match skills::execute_skill_tool(tool, &dir, base_path, args, config).await {
-                                Ok(out) => ToolExecutionResult::success(out),
-                                Err(e) => ToolExecutionResult::error(format!(
-                                    "Error executing skill tool `{}`: {}",
-                                    name, e
-                                )),
-                            };
-                        break;
-                    }
-                }
-                skill_out
-            }
-        }
+        _ => dispatch_extension_tool(name, args, base_path, config, channel_id).await,
     };
 
-    ToolExecutionResult {
-        output: truncate_output(output.output, config.runtime.max_tool_output_bytes),
-        is_error: output.is_error,
-    }
+    output.with_truncated_output(config.runtime.max_tool_output_bytes)
 }
 
 fn truncate_output(output: String, limit: usize) -> String {
@@ -714,10 +752,6 @@ pub(crate) fn get_routing_tool_definitions(base_path: &Path) -> Value {
     tools
 }
 
-pub(crate) fn get_tool_definitions(base_path: &Path, _config: &Config) -> Value {
-    get_routing_tool_definitions(base_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,15 +769,20 @@ mod tests {
                 channel_mappings: None,
             },
             runtime: crate::config::RuntimeConfig::default(),
-            guardian: None,
         }
     }
 
     #[tokio::test]
     async fn test_exec_tool_rejects_when_privileged_mode_is_disabled() {
         let dir = tempdir().unwrap();
-        let result =
-            dispatch_tool("exec", &json!({ "command": "pwd" }), dir.path(), &test_config(), "0").await;
+        let result = dispatch_tool(
+            "exec",
+            &json!({ "command": "pwd" }),
+            dir.path(),
+            &test_config(),
+            "0",
+        )
+        .await;
 
         assert!(result.is_error);
         assert!(result.output.contains("runtime.privileged=false"));
@@ -754,8 +793,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config();
         config.runtime.privileged = true;
-        let result =
-            dispatch_tool("exec", &json!({ "command": "printf host-ok" }), dir.path(), &config, "0").await;
+        let result = dispatch_tool(
+            "exec",
+            &json!({ "command": "printf host-ok" }),
+            dir.path(),
+            &config,
+            "0",
+        )
+        .await;
 
         assert!(!result.is_error);
         assert_eq!(result.output, "host-ok");
@@ -764,11 +809,21 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_tool_rejects_missing_write_content() {
         let dir = tempdir().unwrap();
-        let result =
-            dispatch_tool("write", &json!({ "path": "notes.txt" }), dir.path(), &test_config(), "0").await;
+        let result = dispatch_tool(
+            "write",
+            &json!({ "path": "notes.txt" }),
+            dir.path(),
+            &test_config(),
+            "0",
+        )
+        .await;
 
         assert!(result.is_error);
-        assert!(result.output.contains("Missing required argument `content`"));
+        assert!(
+            result
+                .output
+                .contains("Missing required argument `content`")
+        );
         assert!(!dir.path().join("notes.txt").exists());
     }
 
@@ -776,7 +831,11 @@ mod tests {
     fn test_find_ls_and_grep_tools_work_without_shell() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("docs")).unwrap();
-        fs::write(dir.path().join("docs").join("alpha.txt"), "hello\nfind me\n").unwrap();
+        fs::write(
+            dir.path().join("docs").join("alpha.txt"),
+            "hello\nfind me\n",
+        )
+        .unwrap();
         fs::write(dir.path().join("docs").join("beta.txt"), "nothing\n").unwrap();
 
         let find_result = run_find_tool(&json!({ "name": "alpha", "path": "docs" }), dir.path());
@@ -787,9 +846,58 @@ mod tests {
         assert!(!ls_result.is_error);
         assert!(ls_result.output.contains("FILE docs/alpha.txt"));
 
-        let grep_result = run_grep_tool(&json!({ "pattern": "find me", "path": "docs" }), dir.path());
+        let grep_result =
+            run_grep_tool(&json!({ "pattern": "find me", "path": "docs" }), dir.path());
         assert!(!grep_result.is_error);
         assert!(grep_result.output.contains("docs/alpha.txt:2: find me"));
+    }
+
+    #[test]
+    fn test_read_only_tools_reject_missing_target_path() {
+        let dir = tempdir().unwrap();
+
+        let ls_result = run_ls_tool(&json!({ "path": "missing" }), dir.path());
+        assert!(ls_result.is_error);
+        assert!(ls_result.output.contains("Path not found: missing"));
+
+        let find_result = run_find_tool(&json!({ "name": "alpha", "path": "missing" }), dir.path());
+        assert!(find_result.is_error);
+        assert!(find_result.output.contains("Path not found: missing"));
+
+        let grep_result = run_grep_tool(
+            &json!({ "pattern": "alpha", "path": "missing" }),
+            dir.path(),
+        );
+        assert!(grep_result.is_error);
+        assert!(grep_result.output.contains("Path not found: missing"));
+    }
+
+    #[test]
+    fn test_read_tool_rejects_offset_beyond_file_length() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "line1\nline2\n").unwrap();
+
+        let result = run_read_tool(&json!({ "path": "notes.txt", "offset": 3 }), dir.path());
+        assert!(result.is_error);
+        assert!(result.output.contains("offset 3 is beyond file length 2"));
+    }
+
+    #[test]
+    fn test_edit_tool_rejects_non_unique_match() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "same\nsame\n").unwrap();
+
+        let result = run_edit_tool(
+            &json!({
+                "path": "notes.txt",
+                "oldText": "same",
+                "newText": "changed"
+            }),
+            dir.path(),
+        );
+
+        assert!(result.is_error);
+        assert!(result.output.contains("oldText is not unique in notes.txt"));
     }
 
     #[test]

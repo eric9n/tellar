@@ -5,23 +5,12 @@
  */
 
 use crate::config::Config;
-use crate::discord;
-use crate::tools::{is_path_safe, ToolExecutionResult};
-use serde_json::{json, Value};
+use crate::discord::client as discord_client;
+use crate::tools::{ToolExecutionResult, is_path_safe};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-pub(crate) const DELIVERY_TOOL_NAMES: &[&str] = &[
-    "send_message",
-    "send_reply",
-    "send_embed",
-    "send_attachment",
-    "send_attachments",
-    "send_image",
-    "send_code_block",
-    "send_text_file",
-];
 
 pub(crate) fn delivery_tool_definitions() -> Vec<Value> {
     vec![
@@ -129,14 +118,15 @@ fn require_string_arg<'a>(args: &'a Value, field: &str) -> Result<&'a str, ToolE
     args.get(field)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field)))
+        .ok_or_else(|| {
+            ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field))
+        })
 }
 
 fn require_string_array_arg(args: &Value, field: &str) -> Result<Vec<String>, ToolExecutionResult> {
-    let values = args
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field)))?;
+    let values = args.get(field).and_then(Value::as_array).ok_or_else(|| {
+        ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field))
+    })?;
 
     let items = values
         .iter()
@@ -184,7 +174,9 @@ fn resolve_attachment_path(
         return Ok(path);
     }
 
-    let rel_path = requested_path.strip_prefix("guild/").unwrap_or(requested_path);
+    let rel_path = requested_path
+        .strip_prefix("guild/")
+        .unwrap_or(requested_path);
     let rel_path = rel_path.strip_prefix("./").unwrap_or(rel_path);
 
     if !is_path_safe(base_path, rel_path) {
@@ -233,7 +225,11 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-fn build_outbox_file(base_path: &Path, filename: &str, content: &str) -> Result<PathBuf, ToolExecutionResult> {
+fn build_outbox_file(
+    base_path: &Path,
+    filename: &str,
+    content: &str,
+) -> Result<PathBuf, ToolExecutionResult> {
     let outbox = base_path.join("brain").join("outbox");
     fs::create_dir_all(&outbox)
         .map_err(|e| ToolExecutionResult::error(format!("Error creating outbox: {}", e)))?;
@@ -247,6 +243,39 @@ fn build_outbox_file(base_path: &Path, filename: &str, content: &str) -> Result<
     fs::write(&final_path, content)
         .map_err(|e| ToolExecutionResult::error(format!("Error writing outbox file: {}", e)))?;
     Ok(final_path)
+}
+
+fn path_label(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn delivery_error(action: &str, error: impl std::fmt::Display) -> ToolExecutionResult {
+    ToolExecutionResult::error(format!("Error {}: {}", action, error))
+}
+
+fn delivery_success(message: impl Into<String>) -> ToolExecutionResult {
+    ToolExecutionResult::success(message)
+}
+
+async fn send_attachment_file(
+    token: &str,
+    channel_id: &str,
+    path: &Path,
+    success_noun: &str,
+    error_action: &str,
+    fallback_name: &str,
+) -> ToolExecutionResult {
+    match discord_client::send_file_attachment(token, channel_id, path).await {
+        Ok(_) => delivery_success(format!(
+            "Sent {} `{}` to the current Discord channel.",
+            success_noun,
+            path_label(path, fallback_name)
+        )),
+        Err(error) => delivery_error(error_action, error),
+    }
 }
 
 pub(crate) async fn dispatch_delivery_tool(
@@ -263,9 +292,10 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            match discord::send_bot_message(&config.discord.token, channel_id, content).await {
-                Ok(_) => ToolExecutionResult::success("Sent text message to the current Discord channel."),
-                Err(e) => ToolExecutionResult::error(format!("Error sending message: {}", e)),
+            match discord_client::send_bot_message(&config.discord.token, channel_id, content).await
+            {
+                Ok(_) => delivery_success("Sent text message to the current Discord channel."),
+                Err(error) => delivery_error("sending message", error),
             }
         }
         "send_reply" => {
@@ -278,7 +308,7 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            match discord::send_reply_message(
+            match discord_client::send_reply_message(
                 &config.discord.token,
                 channel_id,
                 message_id,
@@ -286,8 +316,8 @@ pub(crate) async fn dispatch_delivery_tool(
             )
             .await
             {
-                Ok(_) => ToolExecutionResult::success("Sent reply to the current Discord channel."),
-                Err(e) => ToolExecutionResult::error(format!("Error sending reply: {}", e)),
+                Ok(_) => delivery_success("Sent reply to the current Discord channel."),
+                Err(error) => delivery_error("sending reply", error),
             }
         }
         "send_embed" => {
@@ -304,7 +334,7 @@ pub(crate) async fn dispatch_delivery_tool(
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok());
 
-            match discord::send_embed_message(
+            match discord_client::send_embed_message(
                 &config.discord.token,
                 channel_id,
                 title,
@@ -313,8 +343,8 @@ pub(crate) async fn dispatch_delivery_tool(
             )
             .await
             {
-                Ok(_) => ToolExecutionResult::success("Sent embed to the current Discord channel."),
-                Err(e) => ToolExecutionResult::error(format!("Error sending embed: {}", e)),
+                Ok(_) => delivery_success("Sent embed to the current Discord channel."),
+                Err(error) => delivery_error("sending embed", error),
             }
         }
         "send_attachment" => {
@@ -327,16 +357,15 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            match discord::send_file_attachment(&config.discord.token, channel_id, &resolved_path).await {
-                Ok(_) => ToolExecutionResult::success(format!(
-                    "Sent attachment `{}` to the current Discord channel.",
-                    resolved_path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or("file")
-                )),
-                Err(e) => ToolExecutionResult::error(format!("Error sending attachment: {}", e)),
-            }
+            send_attachment_file(
+                &config.discord.token,
+                channel_id,
+                &resolved_path,
+                "attachment",
+                "sending attachment",
+                "file",
+            )
+            .await
         }
         "send_attachments" => {
             let requested_paths = match require_string_array_arg(args, "paths") {
@@ -346,26 +375,25 @@ pub(crate) async fn dispatch_delivery_tool(
 
             let mut sent = Vec::new();
             for requested_path in requested_paths {
-                let resolved_path = match resolve_attachment_path(&requested_path, base_path, config) {
-                    Ok(path) => path,
-                    Err(err) => return Some(err),
-                };
+                let resolved_path =
+                    match resolve_attachment_path(&requested_path, base_path, config) {
+                        Ok(path) => path,
+                        Err(err) => return Some(err),
+                    };
 
-                match discord::send_file_attachment(&config.discord.token, channel_id, &resolved_path).await {
-                    Ok(_) => {
-                        sent.push(
-                            resolved_path
-                                .file_name()
-                                .and_then(|v| v.to_str())
-                                .unwrap_or("file")
-                                .to_string(),
-                        );
-                    }
+                match discord_client::send_file_attachment(
+                    &config.discord.token,
+                    channel_id,
+                    &resolved_path,
+                )
+                .await
+                {
+                    Ok(_) => sent.push(path_label(&resolved_path, "file")),
                     Err(e) => {
                         return Some(ToolExecutionResult::error(format!(
                             "Error sending attachment `{}`: {}",
                             requested_path, e
-                        )))
+                        )));
                     }
                 }
             }
@@ -386,16 +414,15 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            match discord::send_file_attachment(&config.discord.token, channel_id, &resolved_path).await {
-                Ok(_) => ToolExecutionResult::success(format!(
-                    "Sent image `{}` to the current Discord channel.",
-                    resolved_path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or("image")
-                )),
-                Err(e) => ToolExecutionResult::error(format!("Error sending image: {}", e)),
-            }
+            send_attachment_file(
+                &config.discord.token,
+                channel_id,
+                &resolved_path,
+                "image",
+                "sending image",
+                "image",
+            )
+            .await
         }
         "send_code_block" => {
             let content = match require_string_arg(args, "content") {
@@ -403,15 +430,17 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
             let language = args.get("language").and_then(Value::as_str).unwrap_or("");
-            let fenced = if language.is_empty() {
-                format!("```\n{}\n```", content)
-            } else {
-                format!("```{}\n{}\n```", language, content)
-            };
 
-            match discord::send_bot_message(&config.discord.token, channel_id, &fenced).await {
-                Ok(_) => ToolExecutionResult::success("Sent code block to the current Discord channel."),
-                Err(e) => ToolExecutionResult::error(format!("Error sending code block: {}", e)),
+            match discord_client::send_code_block_message(
+                &config.discord.token,
+                channel_id,
+                content,
+                language,
+            )
+            .await
+            {
+                Ok(_) => delivery_success("Sent code block to the current Discord channel."),
+                Err(error) => delivery_error("sending code block", error),
             }
         }
         "send_text_file" => {
@@ -429,15 +458,18 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            match discord::send_file_attachment(&config.discord.token, channel_id, &outbox_file).await {
-                Ok(_) => ToolExecutionResult::success(format!(
+            match discord_client::send_file_attachment(
+                &config.discord.token,
+                channel_id,
+                &outbox_file,
+            )
+            .await
+            {
+                Ok(_) => delivery_success(format!(
                     "Wrote and sent `{}` to the current Discord channel.",
-                    outbox_file
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or("artifact.txt")
+                    path_label(&outbox_file, "artifact.txt")
                 )),
-                Err(e) => ToolExecutionResult::error(format!("Error sending text file: {}", e)),
+                Err(error) => delivery_error("sending text file", error),
             }
         }
         _ => return None,
@@ -464,7 +496,6 @@ mod tests {
                 channel_mappings: None,
             },
             runtime: RuntimeConfig::default(),
-            guardian: None,
         }
     }
 
@@ -479,6 +510,46 @@ mod tests {
         let file = build_outbox_file(dir.path(), "notes.txt", "hello").unwrap();
         let written = fs::read_to_string(file).unwrap();
         assert_eq!(written, "hello");
+    }
+
+    #[test]
+    fn test_path_label_uses_fallback_when_file_name_is_missing() {
+        assert_eq!(path_label(Path::new("/"), "artifact.txt"), "artifact.txt");
+    }
+
+    #[test]
+    fn test_require_string_array_arg_rejects_empty_items_only() {
+        let result = require_string_array_arg(&json!({ "paths": ["", ""] }), "paths");
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .output
+                .contains("must contain at least one non-empty path")
+        );
+    }
+
+    #[test]
+    fn test_resolve_attachment_path_accepts_guild_prefix() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("docs").join("note.txt"), "hello").unwrap();
+
+        let resolved =
+            resolve_attachment_path("guild/docs/note.txt", dir.path(), &test_config()).unwrap();
+
+        assert_eq!(resolved, dir.path().join("docs").join("note.txt"));
+    }
+
+    #[test]
+    fn test_resolve_attachment_path_rejects_path_escape() {
+        let dir = tempdir().unwrap();
+
+        let result = resolve_attachment_path("../secret.txt", dir.path(), &test_config());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().output.contains("Access denied"));
     }
 
     #[tokio::test]
@@ -518,8 +589,20 @@ mod tests {
     #[tokio::test]
     async fn test_send_image_rejects_missing_path() {
         let dir = tempdir().unwrap();
+        let result =
+            dispatch_delivery_tool("send_image", &json!({}), dir.path(), &test_config(), "123")
+                .await
+                .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("Missing required argument `path`"));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_rejects_missing_content() {
+        let dir = tempdir().unwrap();
         let result = dispatch_delivery_tool(
-            "send_image",
+            "send_message",
             &json!({}),
             dir.path(),
             &test_config(),
@@ -529,18 +612,11 @@ mod tests {
         .unwrap();
 
         assert!(result.is_error);
-        assert!(result.output.contains("Missing required argument `path`"));
-    }
-
-    #[tokio::test]
-    async fn test_send_message_rejects_missing_content() {
-        let dir = tempdir().unwrap();
-        let result = dispatch_delivery_tool("send_message", &json!({}), dir.path(), &test_config(), "123")
-            .await
-            .unwrap();
-
-        assert!(result.is_error);
-        assert!(result.output.contains("Missing required argument `content`"));
+        assert!(
+            result
+                .output
+                .contains("Missing required argument `content`")
+        );
     }
 
     #[tokio::test]
@@ -557,7 +633,11 @@ mod tests {
         .unwrap();
 
         assert!(result.is_error);
-        assert!(result.output.contains("Missing required argument `messageId`"));
+        assert!(
+            result
+                .output
+                .contains("Missing required argument `messageId`")
+        );
     }
 
     #[tokio::test]
@@ -574,6 +654,10 @@ mod tests {
         .unwrap();
 
         assert!(result.is_error);
-        assert!(result.output.contains("Missing required argument `description`"));
+        assert!(
+            result
+                .output
+                .contains("Missing required argument `description`")
+        );
     }
 }

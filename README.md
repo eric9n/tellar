@@ -2,17 +2,18 @@
 
 > "In the dance between the digital and the physical, Tellar is the silent partner who keeps the rhythm."
 
-Tellar is a **Minimalist, Document-Driven Cyber Steward** for Discord servers (Guilds). Built with a **Reactive Blackboard Architecture**, Tellar blurs the line between a filesystem and a social space, treating every Discord channel as a living parchment and every thread as a collaborative ritual.
+Tellar is a **Minimalist, Document-Driven Task Processor** for Discord servers (Guilds). Built with a **Reactive Blackboard Architecture**, Tellar treats every Discord channel as a filesystem-backed task surface: it identifies task intent, generates a bounded execution plan, executes it precisely, and records the outcome in durable documents.
 
 ---
 
 ## 🏛️ Core Philosophy
 
-Tellar is built on the principle of **Intelligent Minimalism**. It doesn't aim to be a multi-functional bot with a thousand commands. Instead, it provides the core cognitive primitives—**Perception, Persistence, and Action**—allowing a guild to grow organic intelligence through documents.
+Tellar is built on the principle of **Intelligent Minimalism**. It is not a casual chat bot. It is a bounded task processor that should recognize what the user wants, convert it into a precise task, execute the smallest safe plan, and clearly report success, failure, or missing input.
 
 - **The Blackboard is the State**: No hidden databases. If Tellar knows it, it's written in a file.
-- **Agentic Collaboration**: Tellar doesn't just respond; it observes, maintains, and proposes.
-- **Ritualistic Execution**: Tasks aren't just "jobs"; they are rituals synchronized between Discord and the Guild Foundation.
+- **Task-First Routing**: Every request is classified as executable, missing input, or not supported.
+- **Explicit Failure**: If a task cannot be completed, Tellar should say so directly and explain why.
+- **Ritualistic Execution**: Tasks aren't just "jobs"; they are filesystem-backed rituals and thread steps with durable state.
 
 ---
 
@@ -22,23 +23,23 @@ Tellar is built on the principle of **Intelligent Minimalism**. It doesn't aim t
 The local root of Tellar's consciousness. It mirrors your Discord Server structure, organizing knowledge and state into a predictable hierarchy.
 
 ### 2. Decentralized Knowledge
-Knowledge is not a monolith. Each channel maintains its own `KNOWLEDGE.md`, allowing for context-aware intelligence that stays relevant to the conversation it grew from.
+Knowledge is not a monolith. Each channel maintains its own `KNOWLEDGE.md`, allowing task execution to stay anchored to the local context that produced it.
 
 ### 3. The Steward (管家)
-The reactive role entrypoint. The Steward responds to channel and ritual events, while the underlying runtime is split into focused layers for context, tools, session assembly, and native tool-calling turns.
+The reactive role entrypoint. The Steward responds to channel and ritual events, while the underlying runtime is split into focused layers for context, routing, finite plan execution, and tool dispatch.
 
-### 4. The Guardian (守护者)
-The proactive soul. While the Steward is reactive, the Guardian is observational—auditing health, distilling history into knowledge, and ensuring the foundations remain solid.
-
-### 5. Runtime Layers
+### 4. Runtime Layers
 The runtime is intentionally split into narrow modules instead of one monolithic agent file:
 
+- **Architecture diagram**: See [`docs/architecture-overview.svg`](docs/architecture-overview.svg) for a current high-level module and execution flow map.
+
 - **`tools.rs`**: Core tool definitions, tool dispatch, and local safety boundaries.
-- **`context.rs`**: Prompt loading, blackboard parsing, steering detection, and image extraction.
-- **`agent_loop.rs`**: Native tool-calling turn loop and batch execution policy.
-- **`session.rs`**: Session assembly from prompts, local memory, and multimodal context.
+- **`prompt_context.rs`**: System prompt loading and prompt-related test helpers.
+- **`thread_doc.rs`**: Thread document parsing and task-thread metadata inspection.
+- **`session.rs`**: Session assembly and plan-first request execution.
+- **`plan_executor.rs`**: The main deterministic execution core for conversational and ritual flows.
 - **`thread_runtime.rs`**: Thread-file execution, result persistence, and archival flow.
-- **`steward.rs` / `guardian.rs`**: Role entrypoints, not shared infrastructure containers.
+- **`steward.rs`**: The reactive role entrypoint.
 
 ---
 
@@ -73,13 +74,12 @@ This keeps execution and delivery separate: `exec` or the local cognition tools 
 
 ### Runtime Guardrails
 
-Tellar uses native tool calling with a few explicit runtime constraints to keep long-running guild automation predictable:
+Tellar now runs through explicit finite plans instead of open-ended agent loops. The main guardrails are therefore task-centric:
 
-- **Read-only tools batch together**: `ls`, `find`, `grep`, and `read` can run in the same turn.
-- **Write tools force reevaluation**: `write` and `edit` end the current batch immediately.
-- **Read-only budget**: each turn allows at most 4 read-only tool calls before forcing a new reasoning step.
-- **Duplicate and dead-end detection**: repeated tool calls, repeated errors, and no-new-information loops are cut short.
-- **Hard stop safety fuse**: the default agent loop stops after 16 turns if softer convergence rules fail.
+- **Plan-first execution**: requests are routed into `plan`, `needs_input`, or `reject`.
+- **Bounded steps**: execution is limited to explicit `CallTool`, `Respond`, and `AskForMissing` plan steps.
+- **Explicit outcomes**: every task ends as `Completed`, `NeedsInput`, `Failed`, or `Rejected`.
+- **No silent fallback**: unsupported or blocked work is surfaced directly instead of drifting into exploratory behavior.
 
 ---
 
@@ -117,8 +117,6 @@ gemini:
   model: gemini-3-flash-preview
 discord:
   token: YOUR_DISCORD_BOT_TOKEN
-guardian:
-  model: gemini-2.5-flash
 runtime:
   max_turns: 16
   read_only_budget: 4
@@ -126,7 +124,6 @@ runtime:
 ```
 
 `runtime` controls the main safety and convergence limits for the native tool-calling loop.
-`guardian.model` is optional. If omitted, the Guardian falls back to the main `gemini.model`.
 
 ### Per-Channel Customization
 Tellar supports unique identities for different channels. Place `<CHANNEL_ID>.AGENTS.md` in your `agents/` directory to supplement the base instructions for specific contexts.

@@ -4,13 +4,16 @@
  * Responsibility: Discover and execute user-installed, trusted external skills.
  */
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde_json::Value;
+use std::sync::RwLock;
 use std::time::Duration;
+use std::time::SystemTime;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SkillMetadata {
@@ -46,6 +49,110 @@ struct InstalledSkillTool {
 
 const DEFAULT_SKILL_TIMEOUT_SECS: u64 = 60;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkillDiscoveryStamp {
+    skills_dir_modified: Option<SystemTime>,
+    entry_count: usize,
+    latest_skill_file_modified: Option<SystemTime>,
+}
+
+#[derive(Clone)]
+struct CachedSkillDiscovery {
+    stamp: SkillDiscoveryStamp,
+    skills: Vec<(SkillMetadata, PathBuf)>,
+}
+
+static SKILL_DISCOVERY_CACHE: Lazy<RwLock<HashMap<PathBuf, CachedSkillDiscovery>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+fn modified_time(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+pub(crate) fn skill_discovery_stamp(base_path: &Path) -> SkillDiscoveryStamp {
+    let skills_dir = base_path.join("skills");
+    let mut entry_count = 0;
+    let mut latest_skill_file_modified = None;
+
+    if let Ok(entries) = fs::read_dir(&skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            entry_count += 1;
+
+            for candidate in [path.join("SKILL.json"), path.join("SKILL.md")] {
+                if let Some(modified) = modified_time(&candidate) {
+                    latest_skill_file_modified = Some(
+                        latest_skill_file_modified
+                            .map(|current: SystemTime| current.max(modified))
+                            .unwrap_or(modified),
+                    );
+                }
+            }
+        }
+    }
+
+    SkillDiscoveryStamp {
+        skills_dir_modified: modified_time(&skills_dir),
+        entry_count,
+        latest_skill_file_modified,
+    }
+}
+
+fn discover_skills_uncached(base_path: &Path) -> Vec<(SkillMetadata, PathBuf)> {
+    let mut skills = Vec::new();
+    let skills_dir = base_path.join("skills");
+
+    if !skills_dir.exists() {
+        return skills;
+    }
+
+    if let Ok(entries) = fs::read_dir(skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let installed_file = path.join("SKILL.json");
+                if installed_file.exists() {
+                    match SkillMetadata::from_installed_file(&installed_file) {
+                        Ok(meta) => {
+                            skills.push((meta, path));
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "⚠️ Failed to load cached SKILL.json at {}: {}. Falling back to SKILL.md.",
+                                installed_file.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+
+                let skill_md = path.join("SKILL.md");
+                if skill_md.exists() {
+                    match SkillMetadata::from_file(&skill_md) {
+                        Ok(meta) => {
+                            skills.push((meta, path));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "⚠️ Failed to load legacy skill at {}: {}",
+                                skill_md.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    skills
+}
+
 impl SkillMetadata {
     pub fn from_installed_file(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -72,74 +179,56 @@ impl SkillMetadata {
 
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        
+
         // Very basic Markdown Frontmatter parser
         if !content.starts_with("---") {
             return Err(anyhow!("Missing YAML frontmatter in SKILL.md"));
         }
-        
+
         let parts: Vec<&str> = content.splitn(3, "---").collect();
         if parts.len() < 3 {
             return Err(anyhow!("Invalid SKILL.md format"));
         }
-        
+
         let mut meta: SkillMetadata = serde_yaml::from_str(parts[1])?;
         meta.guidance = parts[2].trim().to_string();
-        
+
         // If name is missing, use directory name
         if meta.name.is_empty() {
-            meta.name = path.parent()
+            meta.name = path
+                .parent()
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
                 .to_string();
         }
-        
+
         Ok(meta)
     }
 
     pub fn discover_skills(base_path: &Path) -> Vec<(SkillMetadata, PathBuf)> {
-        let mut skills = Vec::new();
-        let skills_dir = base_path.join("skills");
-        
-        if !skills_dir.exists() {
-            return skills;
+        let cache_key = base_path.to_path_buf();
+        let stamp = skill_discovery_stamp(base_path);
+
+        if let Some(cached) = SKILL_DISCOVERY_CACHE
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&cache_key).cloned())
+        {
+            if cached.stamp == stamp {
+                return cached.skills;
+            }
         }
 
-        if let Ok(entries) = fs::read_dir(skills_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let installed_file = path.join("SKILL.json");
-                    if installed_file.exists() {
-                        match Self::from_installed_file(&installed_file) {
-                            Ok(meta) => {
-                                skills.push((meta, path));
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "⚠️ Failed to load cached SKILL.json at {}: {}. Falling back to SKILL.md.",
-                                    installed_file.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-
-                    let skill_md = path.join("SKILL.md");
-                    if skill_md.exists() {
-                        match Self::from_file(&skill_md) {
-                            Ok(meta) => {
-                                skills.push((meta, path));
-                            }
-                            Err(e) => {
-                                eprintln!("⚠️ Failed to load legacy skill at {}: {}", skill_md.display(), e);
-                            }
-                        }
-                    }
-                }
-            }
+        let skills = discover_skills_uncached(base_path);
+        if let Ok(mut cache) = SKILL_DISCOVERY_CACHE.write() {
+            cache.insert(
+                cache_key,
+                CachedSkillDiscovery {
+                    stamp,
+                    skills: skills.clone(),
+                },
+            );
         }
         skills
     }
@@ -200,12 +289,9 @@ pub fn has_explicit_skill_match(base_path: &Path, text: &str) -> bool {
         .into_iter()
         .any(|(meta, _)| {
             matches_named_reference(&normalized, &meta.name.to_ascii_lowercase())
-                || meta
-                    .tools
-                    .keys()
-                    .any(|tool_name| {
-                        matches_named_reference(&normalized, &tool_name.to_ascii_lowercase())
-                    })
+                || meta.tools.keys().any(|tool_name| {
+                    matches_named_reference(&normalized, &tool_name.to_ascii_lowercase())
+                })
         })
 }
 
@@ -316,8 +402,12 @@ fn render_template_fragment(template: &str, root: &Value, current: &Value) -> Re
 
         if let Some(name) = tag.strip_prefix('#').map(str::trim) {
             let body_start = pos;
-            let Some((close_start, close_end)) = find_section_close(template, name, body_start) else {
-                return Err(anyhow!("Unclosed section `{}` in skill command template", name));
+            let Some((close_start, close_end)) = find_section_close(template, name, body_start)
+            else {
+                return Err(anyhow!(
+                    "Unclosed section `{}` in skill command template",
+                    name
+                ));
             };
             let body = &template[body_start..close_start];
             let value = lookup_path(root, current, name).unwrap_or(&Value::Null);
@@ -340,8 +430,12 @@ fn render_template_fragment(template: &str, root: &Value, current: &Value) -> Re
 
         if let Some(name) = tag.strip_prefix('^').map(str::trim) {
             let body_start = pos;
-            let Some((close_start, close_end)) = find_section_close(template, name, body_start) else {
-                return Err(anyhow!("Unclosed inverted section `{}` in skill command template", name));
+            let Some((close_start, close_end)) = find_section_close(template, name, body_start)
+            else {
+                return Err(anyhow!(
+                    "Unclosed inverted section `{}` in skill command template",
+                    name
+                ));
             };
             let body = &template[body_start..close_start];
             let value = lookup_path(root, current, name).unwrap_or(&Value::Null);
@@ -355,7 +449,10 @@ fn render_template_fragment(template: &str, root: &Value, current: &Value) -> Re
         }
 
         if tag.starts_with('/') {
-            return Err(anyhow!("Unexpected closing tag `{}` in skill command template", tag));
+            return Err(anyhow!(
+                "Unexpected closing tag `{}` in skill command template",
+                tag
+            ));
         }
 
         if tag.starts_with('!') {
@@ -363,10 +460,16 @@ fn render_template_fragment(template: &str, root: &Value, current: &Value) -> Re
         }
 
         let value = lookup_path(root, current, tag).ok_or_else(|| {
-            anyhow!("Missing template value for `{}` in skill command template", tag)
+            anyhow!(
+                "Missing template value for `{}` in skill command template",
+                tag
+            )
         })?;
         let replacement = template_value_to_shell(value).ok_or_else(|| {
-            anyhow!("Unsupported template value for `{}` in skill command template", tag)
+            anyhow!(
+                "Unsupported template value for `{}` in skill command template",
+                tag
+            )
         })?;
         out.push_str(&replacement);
     }
@@ -434,15 +537,23 @@ pub async fn execute_skill_tool(
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     let mut result = String::new();
-    if !stdout.is_empty() { result.push_str(&stdout); }
-    if !stderr.is_empty() { 
-        if !result.is_empty() { result.push('\n'); }
-        result.push_str(&format!("STDERR:\n{}", stderr)); 
+    if !stdout.is_empty() {
+        result.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&format!("STDERR:\n{}", stderr));
     }
 
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);
-        return Err(anyhow!("Skill tool failed with exit code {}:\n{}", code, result));
+        return Err(anyhow!(
+            "Skill tool failed with exit code {}:\n{}",
+            code,
+            result
+        ));
     }
 
     if result.is_empty() {
@@ -537,7 +648,6 @@ Body
                 channel_mappings: None,
             },
             runtime: RuntimeConfig::default(),
-            guardian: None,
         };
 
         let output = execute_skill_tool(&tool, dir.path(), workspace.path(), &json!({}), &config)
@@ -570,7 +680,8 @@ Use this skill when the user asks for sample operations.
         )
         .unwrap();
 
-        let guidance = build_relevant_skill_guidance(guild.path(), "please use sample here").unwrap();
+        let guidance =
+            build_relevant_skill_guidance(guild.path(), "please use sample here").unwrap();
         assert!(guidance.contains("Skill: sample"));
         assert!(guidance.contains("sample operations"));
     }
@@ -586,7 +697,10 @@ Use this skill when the user asks for sample operations.
         )
         .unwrap();
 
-        assert_eq!(rendered, "./snapshot.sh stock-quote --symbol 'TSLA.US' --limit '5'");
+        assert_eq!(
+            rendered,
+            "./snapshot.sh stock-quote --symbol 'TSLA.US' --limit '5'"
+        );
     }
 
     #[test]
@@ -597,9 +711,10 @@ Use this skill when the user asks for sample operations.
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Missing template value for `symbol`"));
+        assert!(
+            err.to_string()
+                .contains("Missing template value for `symbol`")
+        );
     }
 
     #[test]

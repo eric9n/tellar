@@ -1,18 +1,15 @@
 use tellar::discord;
 use tellar::rhythm;
-use tellar::guardian;
 use tellar::watch;
 
-use tellar::config::Config;
 use tellar::StewardNotification;
+use tellar::config::Config;
 
+use clap::Parser;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use clap::Parser;
-use std::path::PathBuf;
-
-
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Tellar - Minimal Document-Driven Cyber Steward", long_about = None)]
@@ -24,17 +21,19 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!(r#"
+    println!(
+        r#"
     __________  ____    __    ___    ____ 
    /_  __/ __ \/ / /   /   |  / __ \/ __ \
     / / / / / / / /   / /| | / /_/ / / / /
    / / / /_/ / / /___/ ___ |/ _, _/ /_/ / 
   /_/  \____/_/_____/_/  |_/_/ |_|\____/  
-    "#);
+    "#
+    );
 
     let args = Cli::parse();
     let guild_path = args.guild.unwrap_or_else(tellar::default_guild_path);
-    
+
     // 1. Strict check: Guild must exist (no auto-init)
     if !guild_path.exists() {
         eprintln!("❌ Guild directory not found at: {:?}", guild_path);
@@ -57,7 +56,6 @@ async fn main() -> anyhow::Result<()> {
     println!("Guild foundation: {:?}", guild_path);
     println!("📖 Configuration loaded successfully!");
 
-
     // 4. Mirror Guild structure
     let shared_mappings = Arc::new(RwLock::new(HashMap::new()));
     if let Some(guild_id) = &config.discord.guild_id {
@@ -69,11 +67,10 @@ async fn main() -> anyhow::Result<()> {
                 for (id, name) in channels {
                     map.insert(id, name.clone());
                 }
-            },
+            }
             Err(e) => eprintln!("⚠️ Guild discovery failed: {:?}", e),
         }
     }
-
 
     if let Some(manual) = &config.discord.channel_mappings {
         let mut map = shared_mappings.write().await;
@@ -84,19 +81,21 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. [Perception Layer] Start Discord Inscriber
     let (notif_tx, notif_rx) = tokio::sync::mpsc::channel::<StewardNotification>(100);
-    
+
     let config_discord = config.clone();
     let guild_discord = guild_path.clone();
     let mappings_listener = shared_mappings.clone();
     let notif_tx_discord = notif_tx.clone();
-    
+
     tokio::spawn(async move {
         if let Err(e) = discord::start_listening(
-            &config_discord.discord.token, 
-            guild_discord, 
+            &config_discord.discord.token,
+            guild_discord,
             mappings_listener,
-            notif_tx_discord
-        ).await {
+            notif_tx_discord,
+        )
+        .await
+        {
             eprintln!("⚠️ Discord inscriber exited abnormally: {:?}", e);
         }
     });
@@ -110,32 +109,30 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Initial Discord Events Sync (Ensure existing ritual files are up to date)
-    if let Err(e) = discord::sync_all_discord_events(&guild_path, Some(shared_mappings.clone())).await {
+    if let Err(e) =
+        discord::sync_all_discord_events(&guild_path, Some(shared_mappings.clone())).await
+    {
         eprintln!("⚠️ Initial Discord event sync failed: {:?}", e);
     }
 
-
-    // 7. [Maintenance Layer] Mount The Guardian (Silent Observer)
-    let base_path_guardian = guild_path.clone();
-    let config_guardian = config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = guardian::run_guardian_loop(base_path_guardian, config_guardian).await {
-            eprintln!("⚠️ The Guardian service exited abnormally: {:?}", e);
-        }
-    });
-
-    // 8. [Orchestration Layer] Mount The Watchman
+    // 7. [Orchestration Layer] Mount The Watchman
     let base_path_watch = guild_path.clone();
     let config_watch = config.clone();
-    
+
     // Keep a clone of the transmitter alive so the receiver doesn't close if Discord fails
     let _tx_keepalive = notif_tx.clone();
 
     // Watchman is the main synchronous orchestrator now
-    if let Err(e) = watch::start_watchman(&base_path_watch, &config_watch, notif_rx, shared_mappings.clone()).await {
+    if let Err(e) = watch::start_watchman(
+        &base_path_watch,
+        &config_watch,
+        notif_rx,
+        shared_mappings.clone(),
+    )
+    .await
+    {
         eprintln!("⚠️ The Watchman has fallen: {:?}", e);
     }
-
 
     Ok(())
 }

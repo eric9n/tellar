@@ -1,7 +1,7 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use dirs::home_dir;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,7 +65,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Setup { force } => run_setup(&guild_path, force).await?,
         Commands::InstallService => install_linux_service(&guild_path)?,
-        Commands::InstallSkill { path, force } => run_install_skill(&guild_path, &path, force).await?,
+        Commands::InstallSkill { path, force } => {
+            run_install_skill(&guild_path, &path, force).await?
+        }
         Commands::Start => run_service_cmd("start")?,
         Commands::Stop => run_service_cmd("stop")?,
         Commands::Restart => run_service_cmd("restart")?,
@@ -127,7 +129,9 @@ async fn run_setup(guild_path: &Path, force: bool) -> Result<()> {
     println!("Configuration written to {}", config_file.display());
 
     if cfg!(target_os = "linux") {
-        println!("Linux detected. Run `tellarctl install-service` to install the systemd user service.");
+        println!(
+            "Linux detected. Run `tellarctl install-service` to install the systemd user service."
+        );
     } else if cfg!(target_os = "macos") {
         println!("macOS detected. Workspace setup is complete.");
         println!("Service installation is not implemented for Launchd yet.");
@@ -203,7 +207,8 @@ async fn run_install_skill(guild_path: &Path, skill_path: &Path, force: bool) ->
         serde_json::from_str(&json_payload).context("generated SKILL.json is not valid JSON")?;
     validate_installed_skill(&compiled)?;
 
-    let rendered = serde_json::to_string_pretty(&compiled).context("failed to serialize SKILL.json")?;
+    let rendered =
+        serde_json::to_string_pretty(&compiled).context("failed to serialize SKILL.json")?;
     fs::write(&target, rendered)
         .with_context(|| format!("failed to write {}", target.display()))?;
 
@@ -234,7 +239,6 @@ fn load_or_default_config(path: &Path) -> Result<Config> {
                 channel_mappings: None,
             },
             runtime: RuntimeConfig::default(),
-            guardian: None,
         }),
     }
 }
@@ -284,8 +288,7 @@ fn extract_json_object(raw: &str) -> Result<String> {
         return Ok(trimmed.to_string());
     }
 
-    let fenced = Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```")
-        .expect("valid fenced json regex");
+    let fenced = Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```").expect("valid fenced json regex");
     if let Some(caps) = fenced.captures(trimmed) {
         if let Some(body) = caps.get(1) {
             return Ok(body.as_str().trim().to_string());
@@ -394,7 +397,11 @@ async fn configure_model(config: &mut Config) -> Result<()> {
     io::stdin()
         .read_line(&mut choice)
         .context("failed to read stdin")?;
-    let index = choice.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
+    let index = choice
+        .trim()
+        .parse::<usize>()
+        .unwrap_or(1)
+        .saturating_sub(1);
     config.gemini.model = models
         .get(index)
         .cloned()
@@ -589,7 +596,10 @@ mod tests {
 
     #[test]
     fn test_format_command_renders_args() {
-        assert_eq!(format_command("systemctl", &["--user", "status", "tellar"]), "systemctl --user status tellar");
+        assert_eq!(
+            format_command("systemctl", &["--user", "status", "tellar"]),
+            "systemctl --user status tellar"
+        );
         assert_eq!(format_command("journalctl", &[]), "journalctl");
     }
 
