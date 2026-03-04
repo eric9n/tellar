@@ -19,9 +19,7 @@ pub mod session;
 pub mod skills;
 pub mod task_policy;
 pub mod task_response;
-pub mod thread_doc;
-pub mod thread_runtime;
-pub mod thread_store;
+pub mod thread;
 pub mod tools;
 pub mod watch;
 

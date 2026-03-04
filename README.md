@@ -35,11 +35,11 @@ The runtime is intentionally split into narrow modules instead of one monolithic
 
 - **`tools.rs`**: Core tool definitions, tool dispatch, and local safety boundaries.
 - **`prompt_context.rs`**: System prompt loading and prompt-related test helpers.
-- **`thread_doc.rs`**: Thread document parsing and task-thread metadata inspection.
+- **`thread/doc.rs`**: Thread document parsing and task-thread metadata inspection.
 - **`session.rs`**: Session assembly and plan-first request execution.
 - **`plan_executor.rs`**: The main deterministic execution core for conversational and ritual flows.
-- **`thread_runtime.rs`**: Thread-file execution, result persistence, and archival flow.
-- **`steward.rs`**: The reactive role entrypoint.
+- **`thread/mod.rs` / `thread/store.rs`**: Thread-file execution, result persistence, and archival flow.
+- **`watch.rs` / `rhythm.rs`**: File-watch and ritual scheduling triggers that feed thread execution.
 
 ---
 

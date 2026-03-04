@@ -1,18 +1,18 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
- * File Path: src/thread_runtime.rs
+ * File Path: src/thread/mod.rs
  * Responsibility: Execute thread files, dispatch role sessions, and persist results.
  */
 
-use crate::config::Config;
-use crate::discord::client as discord_client;
-use crate::session::{execute_ritual_step, run_conversational_loop};
-use crate::thread_doc::{extract_channel_id_from_path, is_conversational_log, parse_task_document};
-use crate::thread_store::{
+use self::doc::{extract_channel_id_from_path, is_conversational_log, parse_task_document};
+use self::store::{
     append_discord_response_log, append_internal_task_error_log, append_local_response_log,
     append_processing_error_log, append_task_result_log, history_destination,
     should_archive_thread,
 };
+use crate::config::Config;
+use crate::discord::client as discord_client;
+use crate::session::{execute_ritual_step, run_conversational_loop};
 use crate::tools::mask_sensitive_data;
 use chrono::Local;
 use once_cell::sync::Lazy;
@@ -22,6 +22,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
+
+pub mod doc;
+pub mod store;
 
 static EXECUTING_FILES: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static CONCURRENCY_LIMITER: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(5)));

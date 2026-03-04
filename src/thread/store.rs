@@ -1,6 +1,6 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
- * File Path: src/thread_store.rs
+ * File Path: src/thread/store.rs
  * Responsibility: Thread file persistence helpers, log entry formatting, and archive path rules.
  */
 

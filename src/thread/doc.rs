@@ -1,6 +1,6 @@
 /*
  * Tellar - Minimal Document-Driven Cyber Steward
- * File Path: src/thread_doc.rs
+ * File Path: src/thread/doc.rs
  * Responsibility: Thread document parsing and routing-related file inspection.
  */
 

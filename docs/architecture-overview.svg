@@ -44,16 +44,16 @@
   <text class="small" x="82" y="268">discord/mod.rs, watch.rs</text>
 
   <rect class="box" x="350" y="168" width="240" height="120"/>
-  <text class="label" x="372" y="196">Steward Entrypoints</text>
-  <text class="body" x="372" y="220">Reactive runtime entry</text>
-  <text class="body" x="372" y="240">for channel and ritual work</text>
-  <text class="small" x="372" y="268">steward.rs, rhythm.rs</text>
+  <text class="label" x="372" y="196">Watch + Rhythm</text>
+  <text class="body" x="372" y="220">Trigger thread execution</text>
+  <text class="body" x="372" y="240">from file and ritual events</text>
+  <text class="small" x="372" y="268">watch.rs, rhythm.rs</text>
 
   <rect class="box" x="660" y="168" width="250" height="120"/>
   <text class="label" x="682" y="196">Thread Runtime</text>
   <text class="body" x="682" y="220">Loads blackboard files, runs</text>
   <text class="body" x="682" y="240">plan-first sessions, persists output</text>
-  <text class="small" x="682" y="268">thread_runtime.rs</text>
+  <text class="small" x="682" y="268">thread/mod.rs, thread/store.rs</text>
 
   <rect class="boxAlt" x="980" y="168" width="410" height="120"/>
   <text class="label" x="1002" y="196">Rhythm Scheduler</text>

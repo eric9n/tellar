@@ -13,6 +13,12 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
+struct ResolvedTargetPath {
+    rel_path: String,
+    target: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionResult {
     pub output: String,
     pub is_error: bool,
@@ -128,7 +134,7 @@ fn resolve_optional_target_path(
     field: &str,
     default: &str,
     base_path: &Path,
-) -> Result<(String, PathBuf), ToolExecutionResult> {
+) -> Result<ResolvedTargetPath, ToolExecutionResult> {
     let rel_path = normalize_path(optional_path_arg(args, field, default)).to_string();
     if !is_path_safe(base_path, &rel_path) {
         return Err(ToolExecutionResult::error(
@@ -149,7 +155,7 @@ fn resolve_optional_target_path(
         )));
     }
 
-    Ok((rel_path, target))
+    Ok(ResolvedTargetPath { rel_path, target })
 }
 
 fn collect_paths(
@@ -198,8 +204,28 @@ fn collect_paths(
     Ok(())
 }
 
+fn collect_target_paths(
+    base_path: &Path,
+    target: &ResolvedTargetPath,
+    recursive: bool,
+    max_depth: usize,
+) -> Result<Vec<(String, PathBuf)>, ToolExecutionResult> {
+    let mut paths = Vec::new();
+    collect_paths(
+        base_path,
+        &target.target,
+        &target.rel_path,
+        recursive,
+        max_depth,
+        0,
+        &mut paths,
+    )
+    .map_err(|e| ToolExecutionResult::error(format!("Error scanning path: {}", e)))?;
+    Ok(paths)
+}
+
 pub(crate) fn run_ls_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
-    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+    let target = match resolve_optional_target_path(args, "path", ".", base_path) {
         Ok(value) => value,
         Err(err) => return err,
     };
@@ -210,24 +236,29 @@ pub(crate) fn run_ls_tool(args: &Value, base_path: &Path) -> ToolExecutionResult
         .unwrap_or(false);
     let max_depth = args.get("maxDepth").and_then(Value::as_u64).unwrap_or(2) as usize;
 
-    if target.is_file() {
-        return match fs::metadata(&target) {
-            Ok(meta) => {
-                ToolExecutionResult::success(format!("FILE {} ({} bytes)", rel_path, meta.len()))
-            }
+    if target.target.is_file() {
+        return match fs::metadata(&target.target) {
+            Ok(meta) => ToolExecutionResult::success(format!(
+                "FILE {} ({} bytes)",
+                target.rel_path,
+                meta.len()
+            )),
             Err(e) => ToolExecutionResult::error(format!("Error reading metadata: {}", e)),
         };
     }
 
-    let mut paths = Vec::new();
-    if let Err(e) = collect_paths(
-        base_path, &target, &rel_path, recursive, max_depth, 0, &mut paths,
-    ) {
-        return ToolExecutionResult::error(format!("Error listing path: {}", e));
-    }
+    let paths = match collect_target_paths(base_path, &target, recursive, max_depth) {
+        Ok(paths) => paths,
+        Err(err) => {
+            return ToolExecutionResult::error(
+                err.output
+                    .replace("Error scanning path:", "Error listing path:"),
+            );
+        }
+    };
 
     if paths.is_empty() {
-        ToolExecutionResult::success(format!("Directory {} is empty.", rel_path))
+        ToolExecutionResult::success(format!("Directory {} is empty.", target.rel_path))
     } else {
         let lines = paths
             .into_iter()
@@ -246,7 +277,7 @@ pub(crate) fn run_find_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
         Ok(value) => value,
         Err(err) => return err,
     };
-    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+    let target = match resolve_optional_target_path(args, "path", ".", base_path) {
         Ok(value) => value,
         Err(err) => return err,
     };
@@ -262,12 +293,10 @@ pub(crate) fn run_find_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
     let max_matches = args.get("maxMatches").and_then(Value::as_u64).unwrap_or(50) as usize;
     let max_depth = args.get("maxDepth").and_then(Value::as_u64).unwrap_or(8) as usize;
 
-    let mut paths = Vec::new();
-    if let Err(e) = collect_paths(
-        base_path, &target, &rel_path, recursive, max_depth, 0, &mut paths,
-    ) {
-        return ToolExecutionResult::error(format!("Error scanning path: {}", e));
-    }
+    let paths = match collect_target_paths(base_path, &target, recursive, max_depth) {
+        Ok(paths) => paths,
+        Err(err) => return err,
+    };
 
     let needle = if case_sensitive {
         name.to_string()
@@ -295,7 +324,10 @@ pub(crate) fn run_find_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
     }
 
     if matches.is_empty() {
-        ToolExecutionResult::success(format!("No paths matching `{}` under {}.", name, rel_path))
+        ToolExecutionResult::success(format!(
+            "No paths matching `{}` under {}.",
+            name, target.rel_path
+        ))
     } else {
         ToolExecutionResult::success(matches.join("\n"))
     }
@@ -306,7 +338,7 @@ pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
         Ok(value) => value,
         Err(err) => return err,
     };
-    let (rel_path, target) = match resolve_optional_target_path(args, "path", ".", base_path) {
+    let target = match resolve_optional_target_path(args, "path", ".", base_path) {
         Ok(value) => value,
         Err(err) => return err,
     };
@@ -321,18 +353,10 @@ pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
         .unwrap_or(false);
     let max_matches = args.get("maxMatches").and_then(Value::as_u64).unwrap_or(50) as usize;
 
-    let mut paths = Vec::new();
-    if let Err(e) = collect_paths(
-        base_path,
-        &target,
-        &rel_path,
-        recursive,
-        usize::MAX,
-        0,
-        &mut paths,
-    ) {
-        return ToolExecutionResult::error(format!("Error scanning path: {}", e));
-    }
+    let paths = match collect_target_paths(base_path, &target, recursive, usize::MAX) {
+        Ok(paths) => paths,
+        Err(err) => return err,
+    };
 
     let needle = if case_sensitive {
         pattern.to_string()
@@ -365,7 +389,10 @@ pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
     }
 
     if matches.is_empty() {
-        ToolExecutionResult::success(format!("No matches for `{}` under {}.", pattern, rel_path))
+        ToolExecutionResult::success(format!(
+            "No matches for `{}` under {}.",
+            pattern, target.rel_path
+        ))
     } else {
         ToolExecutionResult::success(matches.join("\n"))
     }
@@ -681,6 +708,41 @@ async fn dispatch_extension_tool(
     ToolExecutionResult::error(format!("Error: Unknown tool `{}`", name))
 }
 
+fn dispatch_core_sync_tool(
+    name: &str,
+    args: &Value,
+    base_path: &Path,
+) -> Option<ToolExecutionResult> {
+    let result = match name {
+        "ls" => run_ls_tool(args, base_path),
+        "find" => run_find_tool(args, base_path),
+        "grep" => run_grep_tool(args, base_path),
+        "read" => run_read_tool(args, base_path),
+        "write" => run_write_tool(args, base_path),
+        "edit" => run_edit_tool(args, base_path),
+        _ => return None,
+    };
+
+    Some(result)
+}
+
+async fn dispatch_builtin_tool(
+    name: &str,
+    args: &Value,
+    base_path: &Path,
+    config: &Config,
+) -> Option<ToolExecutionResult> {
+    if let Some(result) = dispatch_core_sync_tool(name, args, base_path) {
+        return Some(result);
+    }
+
+    if name == "exec" {
+        return Some(run_exec_tool(args, base_path, config).await);
+    }
+
+    None
+}
+
 pub(crate) async fn dispatch_tool(
     name: &str,
     args: &Value,
@@ -688,15 +750,9 @@ pub(crate) async fn dispatch_tool(
     config: &Config,
     channel_id: &str,
 ) -> ToolExecutionResult {
-    let output = match name {
-        "ls" => run_ls_tool(args, base_path),
-        "find" => run_find_tool(args, base_path),
-        "grep" => run_grep_tool(args, base_path),
-        "read" => run_read_tool(args, base_path),
-        "write" => run_write_tool(args, base_path),
-        "edit" => run_edit_tool(args, base_path),
-        "exec" => run_exec_tool(args, base_path, config).await,
-        _ => dispatch_extension_tool(name, args, base_path, config, channel_id).await,
+    let output = match dispatch_builtin_tool(name, args, base_path, config).await {
+        Some(result) => result,
+        None => dispatch_extension_tool(name, args, base_path, config, channel_id).await,
     };
 
     output.with_truncated_output(config.runtime.max_tool_output_bytes)
@@ -732,24 +788,31 @@ fn truncate_output(output: String, limit: usize) -> String {
     }
 }
 
-pub(crate) fn get_routing_tool_definitions(base_path: &Path) -> Value {
-    let mut tools = json!(core_tool_definitions());
+fn extend_tool_definitions(target: &mut Vec<Value>, tools: impl IntoIterator<Item = Value>) {
+    target.extend(tools);
+}
 
-    for tool in delivery::delivery_tool_definitions() {
-        tools.as_array_mut().unwrap().push(tool);
-    }
+fn skill_routing_tool_definitions(base_path: &Path) -> Vec<Value> {
+    let mut tools = Vec::new();
 
-    let discovered = SkillMetadata::discover_skills(base_path);
-    for (meta, _) in discovered {
+    for (meta, _) in SkillMetadata::discover_skills(base_path) {
         for (tool_name, tool_info) in meta.tools {
-            tools.as_array_mut().unwrap().push(json!({
+            tools.push(json!({
                 "name": tool_name,
                 "description": format!("{}: {}", meta.name, tool_info.description),
                 "parameters": tool_info.parameters
             }));
         }
     }
+
     tools
+}
+
+pub(crate) fn get_routing_tool_definitions(base_path: &Path) -> Value {
+    let mut tools = core_tool_definitions();
+    extend_tool_definitions(&mut tools, delivery::delivery_tool_definitions());
+    extend_tool_definitions(&mut tools, skill_routing_tool_definitions(base_path));
+    json!(tools)
 }
 
 #[cfg(test)]

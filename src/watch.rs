@@ -6,7 +6,7 @@
 
 use crate::StewardNotification;
 use crate::config::Config;
-use crate::thread_runtime;
+use crate::thread;
 use notify::{
     EventKind, RecursiveMode, Watcher,
     event::{CreateKind, ModifyKind},
@@ -92,7 +92,7 @@ pub async fn start_watchman(
             Some(notif) = notif_rx.recv() => {
                 println!("📢 Watchman received signal: awakens Steward...");
                 // Trigger immediate execution with full context
-                let _ = thread_runtime::execute_thread_file(
+                let _ = thread::execute_thread_file(
                     &notif.blackboard_path,
                     &base_path_clone,
                     &config_clone,
@@ -116,7 +116,7 @@ pub async fn start_watchman(
                             }
                             WatchAction::ExecuteRitual => {
                                 println!("⚙️ Watchman detected ritual edit: {:?}, awakening Steward...", file_name);
-                                let _ = thread_runtime::execute_thread_file(&path, &base_path_clone, &config_clone, None, None, None).await;
+                                let _ = thread::execute_thread_file(&path, &base_path_clone, &config_clone, None, None, None).await;
                             }
                             WatchAction::Ignore => {
                                 // Channels are intentionally passive to filesystem events.

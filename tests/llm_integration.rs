@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use tellar::thread_runtime;
+use tellar::thread;
 use tempfile::tempdir;
 
 fn should_skip_live_gemini_error(err: &str) -> bool {
@@ -73,15 +73,9 @@ async fn test_full_plan_driven_ritual_turn_with_gemini_3() {
     println!("🚀 Starting full plan-driven ritual turn...");
 
     // 3. Run the thread runtime through the public ritual path.
-    let result = thread_runtime::execute_thread_file(
-        &path,
-        base_path,
-        &config,
-        None,
-        Some("0".to_string()),
-        None,
-    )
-    .await;
+    let result =
+        thread::execute_thread_file(&path, base_path, &config, None, Some("0".to_string()), None)
+            .await;
 
     match result {
         Ok(()) => {
@@ -165,15 +159,9 @@ async fn test_privileged_request_with_exec_disabled_settles_without_completing_r
 
     println!("🚀 Starting privileged-mode clarification live test...");
 
-    let result = thread_runtime::execute_thread_file(
-        &path,
-        base_path,
-        &config,
-        None,
-        Some("0".to_string()),
-        None,
-    )
-    .await;
+    let result =
+        thread::execute_thread_file(&path, base_path, &config, None, Some("0".to_string()), None)
+            .await;
 
     match result {
         Ok(()) => {
