@@ -17,7 +17,7 @@ use crate::tools::mask_sensitive_data;
 use chrono::Local;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,16 @@ use tokio::sync::Semaphore;
 pub mod doc;
 pub mod store;
 
+#[derive(Debug, Clone)]
+struct PendingThreadRun {
+    trigger_id: Option<String>,
+    target_channel_id: Option<String>,
+    target_guild_id: Option<String>,
+}
+
 static EXECUTING_FILES: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static PENDING_THREAD_RUNS: Lazy<Mutex<HashMap<PathBuf, PendingThreadRun>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 static CONCURRENCY_LIMITER: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(5)));
 static PENDING_TODO_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"- \[ \] (.*)").expect("valid todo capture regex"));
@@ -39,24 +48,56 @@ pub async fn execute_thread_file(
     target_channel_id: Option<String>,
     target_guild_id: Option<String>,
 ) -> anyhow::Result<()> {
+    let mut next_run = PendingThreadRun {
+        trigger_id,
+        target_channel_id,
+        target_guild_id,
+    };
+
     {
         let mut executing = EXECUTING_FILES.lock().unwrap();
         if executing.contains(path) {
+            let mut pending = PENDING_THREAD_RUNS.lock().unwrap();
+            pending.insert(path.clone(), next_run);
             return Ok(());
         }
         executing.insert(path.clone());
     }
 
     let _permit = CONCURRENCY_LIMITER.acquire().await.unwrap();
-    let res = execute_thread_file_internal(
-        path,
-        base_path,
-        config,
-        trigger_id,
-        target_channel_id,
-        target_guild_id,
-    )
-    .await;
+    let res = loop {
+        let PendingThreadRun {
+            trigger_id,
+            target_channel_id,
+            target_guild_id,
+        } = next_run;
+
+        let result = execute_thread_file_internal(
+            path,
+            base_path,
+            config,
+            trigger_id,
+            target_channel_id,
+            target_guild_id,
+        )
+        .await;
+
+        let pending_rerun = {
+            let mut pending = PENDING_THREAD_RUNS.lock().unwrap();
+            pending.remove(path)
+        };
+
+        match pending_rerun {
+            Some(pending) => {
+                println!(
+                    "🔁 Re-running thread {:?} to process a coalesced trigger.",
+                    path.file_name()
+                );
+                next_run = pending;
+            }
+            None => break result,
+        }
+    };
 
     {
         let mut executing = EXECUTING_FILES.lock().unwrap();
@@ -189,7 +230,13 @@ async fn execute_thread_file_internal(
                             &msg.id.to_string(),
                             &outcome.user_response,
                         );
-                        let _ = fs::write(path, &content);
+                        if let Err(error) = fs::write(path, &content) {
+                            eprintln!(
+                                "⚠️ Failed to persist Discord-backed response log for {:?}: {:?}",
+                                path.file_name(),
+                                error
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!(
@@ -202,7 +249,13 @@ async fn execute_thread_file_internal(
                             &timestamp.to_string(),
                             &outcome.user_response,
                         );
-                        let _ = fs::write(path, &content);
+                        if let Err(error) = fs::write(path, &content) {
+                            eprintln!(
+                                "⚠️ Failed to persist local fallback response log for {:?}: {:?}",
+                                path.file_name(),
+                                error
+                            );
+                        }
                     }
                 }
             }
@@ -211,14 +264,26 @@ async fn execute_thread_file_internal(
                 let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
                 content =
                     append_processing_error_log(&content, &timestamp.to_string(), &e.to_string());
-                let _ = fs::write(path, &content);
+                if let Err(error) = fs::write(path, &content) {
+                    eprintln!(
+                        "⚠️ Failed to persist processing error log for {:?}: {:?}",
+                        path.file_name(),
+                        error
+                    );
+                }
 
-                let _ = discord_client::send_bot_message(
+                if let Err(error) = discord_client::send_bot_message(
                     &config.discord.token,
                     &channel_id,
                     "⚠️ *管家在处理您的请求时遇到了异常，请稍后再试，或检查黑板记录。*",
                 )
-                .await;
+                .await
+                {
+                    eprintln!(
+                        "⚠️ Failed to send processing-error notification to {}: {:?}",
+                        channel_id, error
+                    );
+                }
             }
         }
     }
@@ -236,7 +301,7 @@ async fn execute_thread_file_internal(
                         eprintln!("⚠️ Failed to archive thread: {:?}", e);
                     } else {
                         println!("📦 Thread archived to history/{}", today);
-                        let _ = discord_client::send_bot_message(
+                        if let Err(error) = discord_client::send_bot_message(
                             &config.discord.token,
                             &channel_id,
                             &format!(
@@ -244,7 +309,13 @@ async fn execute_thread_file_internal(
                                 thread_id, today
                             ),
                         )
-                        .await;
+                        .await
+                        {
+                            eprintln!(
+                                "⚠️ Failed to send archive notification to {}: {:?}",
+                                channel_id, error
+                            );
+                        }
                     }
                 }
             }

@@ -265,16 +265,8 @@ pub(crate) fn parse_route_decision(
     validate_route_decision(decision, allowed_tools)
 }
 
-pub(crate) async fn plan_conversational_request(
-    base_path: &Path,
-    config: &Config,
-    workset: &Workset,
-) -> Result<RequestRoute> {
-    let text = workset.text();
-    let catalog = collect_routing_tool_catalog(base_path, config, &text);
-    let allowed_tools = &catalog.allowed_tools;
-
-    let routing_prompt = format!(
+fn build_routing_prompt(rendered_specs: &str) -> String {
+    format!(
         "You are Tellar's task router. Return exactly one JSON object and nothing else.\n\
 Your job is to identify the user's task intent, decide whether the task is executable, and produce the narrowest safe route.\n\
 Tellar is a task processor, not a chat companion. Do not optimize for conversational variety. Optimize for precise execution.\n\
@@ -305,13 +297,17 @@ Optional plan metadata:\n\
 Tool catalog:\n{}\n\n\
 Output schema:\n\
 {{\"route\":\"plan|needs_input|reject\",\"intent\":\"... optional for plan\",\"confidence\":\"... optional for plan\",\"reason\":\"... only for reject\",\"prompt\":\"... for needs_input\",\"fields\":[\"...\"],\"steps\":[{{\"kind\":\"CallTool|Respond|AskForMissing\",...}}]}}",
-        catalog.rendered_specs
-    );
+        rendered_specs
+    )
+}
 
-    let user_prompt = format!("Route this request:\n{}", text);
-
+async fn request_route_narrative(
+    config: &Config,
+    routing_prompt: &str,
+    user_prompt: String,
+) -> Result<String> {
     let turn = llm::generate_turn(
-        &routing_prompt,
+        routing_prompt,
         vec![llm::Message {
             role: llm::MessageRole::User,
             parts: vec![llm::MultimodalPart::text(user_prompt)],
@@ -323,10 +319,24 @@ Output schema:\n\
     )
     .await?;
 
-    let narrative = match turn {
-        llm::ModelTurn::Narrative(text) => text,
+    match turn {
+        llm::ModelTurn::Narrative(text) => Ok(text),
         llm::ModelTurn::ToolCalls { .. } => bail!("routing model attempted tool calls"),
-    };
+    }
+}
+
+pub(crate) async fn plan_conversational_request(
+    base_path: &Path,
+    config: &Config,
+    workset: &Workset,
+) -> Result<RequestRoute> {
+    let text = workset.text();
+    let catalog = collect_routing_tool_catalog(base_path, config, &text);
+    let allowed_tools = &catalog.allowed_tools;
+
+    let routing_prompt = build_routing_prompt(&catalog.rendered_specs);
+    let user_prompt = format!("Route this request:\n{}", text);
+    let narrative = request_route_narrative(config, &routing_prompt, user_prompt).await?;
 
     parse_route_decision(&narrative, allowed_tools)
 }

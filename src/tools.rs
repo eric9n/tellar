@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::delivery;
 use crate::skills::{self, SkillMetadata};
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -665,27 +666,55 @@ pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
     masked
 }
 
+fn routing_tool_name(definition: &Value) -> Option<String> {
+    definition
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn reserved_tool_names() -> HashSet<String> {
+    let mut names = HashSet::new();
+    for definition in core_tool_definitions()
+        .into_iter()
+        .chain(delivery::delivery_tool_definitions())
+    {
+        if let Some(name) = routing_tool_name(&definition) {
+            names.insert(name);
+        }
+    }
+    names
+}
+
 async fn dispatch_skill_tool(
     name: &str,
     args: &Value,
     base_path: &Path,
     config: &Config,
 ) -> Option<ToolExecutionResult> {
+    let mut selected: Option<(String, skills::SkillTool, PathBuf)> = None;
+
     for (meta, dir) in SkillMetadata::discover_skills(base_path) {
-        if let Some(tool) = meta.tools.get(name) {
-            let result = match skills::execute_skill_tool(tool, &dir, base_path, args, config).await
-            {
-                Ok(output) => ToolExecutionResult::success(output),
-                Err(error) => ToolExecutionResult::error(format!(
-                    "Error executing skill tool `{}`: {}",
-                    name, error
-                )),
-            };
-            return Some(result);
+        if let Some(tool) = meta.tools.get(name).cloned() {
+            if let Some((existing_skill, _, _)) = &selected {
+                return Some(ToolExecutionResult::error(format!(
+                    "Error: Tool `{}` is ambiguous across multiple skills ({} and {}). Rename one of the tools.",
+                    name, existing_skill, meta.name
+                )));
+            }
+
+            selected = Some((meta.name, tool, dir));
         }
     }
 
-    None
+    let (_, tool, dir) = selected?;
+    let result = match skills::execute_skill_tool(&tool, &dir, base_path, args, config).await {
+        Ok(output) => ToolExecutionResult::success(output),
+        Err(error) => {
+            ToolExecutionResult::error(format!("Error executing skill tool `{}`: {}", name, error))
+        }
+    };
+    Some(result)
 }
 
 async fn dispatch_extension_tool(
@@ -793,10 +822,25 @@ fn extend_tool_definitions(target: &mut Vec<Value>, tools: impl IntoIterator<Ite
 }
 
 fn skill_routing_tool_definitions(base_path: &Path) -> Vec<Value> {
-    let mut tools = Vec::new();
+    let reserved = reserved_tool_names();
+    let discovered = SkillMetadata::discover_skills(base_path);
+    let mut name_counts = HashMap::new();
 
-    for (meta, _) in SkillMetadata::discover_skills(base_path) {
+    for (meta, _) in &discovered {
+        for tool_name in meta.tools.keys() {
+            *name_counts.entry(tool_name.clone()).or_insert(0usize) += 1;
+        }
+    }
+
+    let mut tools = Vec::new();
+    for (meta, _) in discovered {
         for (tool_name, tool_info) in meta.tools {
+            if reserved.contains(&tool_name) {
+                continue;
+            }
+            if name_counts.get(&tool_name).copied().unwrap_or(0) > 1 {
+                continue;
+            }
             tools.push(json!({
                 "name": tool_name,
                 "description": format!("{}: {}", meta.name, tool_info.description),
@@ -819,6 +863,27 @@ pub(crate) fn get_routing_tool_definitions(base_path: &Path) -> Value {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn write_test_skill(base_path: &Path, dir_name: &str, skill_name: &str, tool_name: &str) {
+        let skill_dir = base_path.join("skills").join(dir_name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.json"),
+            json!({
+                "name": skill_name,
+                "description": format!("{} description", skill_name),
+                "guidance": format!("{} guidance", skill_name),
+                "tools": [{
+                    "name": tool_name,
+                    "description": format!("{} tool", tool_name),
+                    "parameters": { "type": "object" },
+                    "command": "printf skill-ok"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
 
     fn test_config() -> Config {
         Config {
@@ -975,5 +1040,40 @@ mod tests {
         std::os::windows::fs::symlink_file(&escape_target, dir.path().join("escape.txt")).unwrap();
 
         assert!(!is_path_safe(dir.path(), "escape.txt"));
+    }
+
+    #[test]
+    fn test_routing_tool_definitions_skip_reserved_and_ambiguous_skill_tools() {
+        let dir = tempdir().unwrap();
+        write_test_skill(dir.path(), "reserved-skill", "ReservedSkill", "read");
+        write_test_skill(dir.path(), "dup-one", "DupOne", "shared_tool");
+        write_test_skill(dir.path(), "dup-two", "DupTwo", "shared_tool");
+        write_test_skill(dir.path(), "unique-skill", "UniqueSkill", "unique_tool");
+
+        let definitions = get_routing_tool_definitions(dir.path());
+        let names = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(routing_tool_name)
+            .collect::<HashSet<_>>();
+
+        assert!(names.contains("read"));
+        assert!(!names.contains("shared_tool"));
+        assert!(names.contains("send_message"));
+        assert!(names.contains("unique_tool"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_tool_rejects_ambiguous_skill_tool_name() {
+        let dir = tempdir().unwrap();
+        write_test_skill(dir.path(), "dup-one", "DupOne", "shared_tool");
+        write_test_skill(dir.path(), "dup-two", "DupTwo", "shared_tool");
+
+        let result =
+            dispatch_tool("shared_tool", &json!({}), dir.path(), &test_config(), "0").await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("ambiguous across multiple skills"));
     }
 }

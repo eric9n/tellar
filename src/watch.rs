@@ -92,14 +92,16 @@ pub async fn start_watchman(
             Some(notif) = notif_rx.recv() => {
                 println!("📢 Watchman received signal: awakens Steward...");
                 // Trigger immediate execution with full context
-                let _ = thread::execute_thread_file(
+                if let Err(error) = thread::execute_thread_file(
                     &notif.blackboard_path,
                     &base_path_clone,
                     &config_clone,
                     Some(notif.message_id),
                     Some(notif.channel_id),
                     Some(notif.guild_id)
-                ).await;
+                ).await {
+                    eprintln!("⚠️ Watchman failed to execute conversational trigger: {:?}", error);
+                }
 
 
             },
@@ -112,11 +114,15 @@ pub async fn start_watchman(
 
                         match classify_watch_path(&path, &brain_dir, &rituals_dir) {
                             WatchAction::SyncBrainEvents => {
-                                let _ = crate::discord::sync_all_discord_events(&base_path_clone, Some(mappings.clone())).await;
+                                if let Err(error) = crate::discord::sync_all_discord_events(&base_path_clone, Some(mappings.clone())).await {
+                                    eprintln!("⚠️ Watchman failed to sync brain events: {:?}", error);
+                                }
                             }
                             WatchAction::ExecuteRitual => {
                                 println!("⚙️ Watchman detected ritual edit: {:?}, awakening Steward...", file_name);
-                                let _ = thread::execute_thread_file(&path, &base_path_clone, &config_clone, None, None, None).await;
+                                if let Err(error) = thread::execute_thread_file(&path, &base_path_clone, &config_clone, None, None, None).await {
+                                    eprintln!("⚠️ Watchman failed to execute ritual trigger for {:?}: {:?}", file_name, error);
+                                }
                             }
                             WatchAction::Ignore => {
                                 // Channels are intentionally passive to filesystem events.

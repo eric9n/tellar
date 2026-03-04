@@ -128,12 +128,24 @@ fn require_string_array_arg(args: &Value, field: &str) -> Result<Vec<String>, To
         ToolExecutionResult::error(format!("Error: Missing required argument `{}`.", field))
     })?;
 
-    let items = values
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    let mut items = Vec::with_capacity(values.len());
+    for value in values {
+        let item = value.as_str().ok_or_else(|| {
+            ToolExecutionResult::error(format!(
+                "Error: `{}` must contain only non-empty string values.",
+                field
+            ))
+        })?;
+
+        if item.is_empty() {
+            return Err(ToolExecutionResult::error(format!(
+                "Error: `{}` must contain only non-empty string values.",
+                field
+            )));
+        }
+
+        items.push(item.to_string());
+    }
 
     if items.is_empty() {
         Err(ToolExecutionResult::error(format!(
@@ -373,14 +385,18 @@ pub(crate) async fn dispatch_delivery_tool(
                 Err(err) => return Some(err),
             };
 
-            let mut sent = Vec::new();
-            for requested_path in requested_paths {
-                let resolved_path =
-                    match resolve_attachment_path(&requested_path, base_path, config) {
-                        Ok(path) => path,
-                        Err(err) => return Some(err),
-                    };
+            let mut resolved_paths = Vec::with_capacity(requested_paths.len());
+            for requested_path in &requested_paths {
+                let resolved_path = match resolve_attachment_path(requested_path, base_path, config)
+                {
+                    Ok(path) => path,
+                    Err(err) => return Some(err),
+                };
+                resolved_paths.push((requested_path, resolved_path));
+            }
 
+            let mut sent = Vec::new();
+            for (requested_path, resolved_path) in resolved_paths {
                 match discord_client::send_file_attachment(
                     &config.discord.token,
                     channel_id,
@@ -465,10 +481,21 @@ pub(crate) async fn dispatch_delivery_tool(
             )
             .await
             {
-                Ok(_) => delivery_success(format!(
-                    "Wrote and sent `{}` to the current Discord channel.",
-                    path_label(&outbox_file, "artifact.txt")
-                )),
+                Ok(_) => {
+                    let label = path_label(&outbox_file, "artifact.txt");
+                    if let Err(error) = fs::remove_file(&outbox_file) {
+                        eprintln!(
+                            "⚠️ Failed to remove sent outbox artifact {}: {}",
+                            outbox_file.display(),
+                            error
+                        );
+                    }
+
+                    delivery_success(format!(
+                        "Wrote and sent `{}` to the current Discord channel.",
+                        label
+                    ))
+                }
                 Err(error) => delivery_error("sending text file", error),
             }
         }
@@ -518,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_require_string_array_arg_rejects_empty_items_only() {
+    fn test_require_string_array_arg_rejects_empty_items() {
         let result = require_string_array_arg(&json!({ "paths": ["", ""] }), "paths");
 
         assert!(result.is_err());
@@ -526,7 +553,20 @@ mod tests {
             result
                 .unwrap_err()
                 .output
-                .contains("must contain at least one non-empty path")
+                .contains("must contain only non-empty string values")
+        );
+    }
+
+    #[test]
+    fn test_require_string_array_arg_rejects_non_string_items() {
+        let result = require_string_array_arg(&json!({ "paths": ["ok.txt", 123] }), "paths");
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .output
+                .contains("must contain only non-empty string values")
         );
     }
 
@@ -584,6 +624,25 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.output.contains("Missing required argument `paths`"));
+    }
+
+    #[tokio::test]
+    async fn test_send_attachments_prevalidates_all_paths_before_sending() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("ok.txt"), "hello").unwrap();
+
+        let result = dispatch_delivery_tool(
+            "send_attachments",
+            &json!({ "paths": ["ok.txt", "missing.txt"] }),
+            dir.path(),
+            &test_config(),
+            "123",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("File not found: missing.txt"));
     }
 
     #[tokio::test]
