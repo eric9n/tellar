@@ -48,7 +48,7 @@ fn classify_watch_path(path: &Path, brain_dir: &Path, rituals_dir: &Path) -> Wat
 
 pub async fn start_watchman(
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     mut notif_rx: mpsc::Receiver<StewardNotification>,
     mappings: Arc<RwLock<HashMap<String, String>>>,
 ) -> anyhow::Result<()> {
@@ -84,7 +84,7 @@ pub async fn start_watchman(
     watcher.watch(&rituals_dir, RecursiveMode::Recursive)?;
 
     let base_path_clone = base_path.to_path_buf();
-    let config_clone = config.clone();
+    let config_clone = Arc::clone(&config);
 
     loop {
         tokio::select! {
@@ -95,7 +95,7 @@ pub async fn start_watchman(
                 if let Err(error) = thread::execute_thread_file(
                     &notif.blackboard_path,
                     &base_path_clone,
-                    &config_clone,
+                    config_clone.clone(),
                     Some(notif.message_id),
                     Some(notif.channel_id),
                     Some(notif.guild_id)
@@ -120,7 +120,7 @@ pub async fn start_watchman(
                             }
                             WatchAction::ExecuteRitual => {
                                 println!("⚙️ Watchman detected ritual edit: {:?}, awakening Steward...", file_name);
-                                if let Err(error) = thread::execute_thread_file(&path, &base_path_clone, &config_clone, None, None, None).await {
+                                if let Err(error) = thread::execute_thread_file(&path, &base_path_clone, config_clone.clone(), None, None, None).await {
                                     eprintln!("⚠️ Watchman failed to execute ritual trigger for {:?}: {:?}", file_name, error);
                                 }
                             }

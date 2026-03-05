@@ -107,55 +107,9 @@ impl PlanExecutionState {
 pub(crate) struct PlanExecutionContext<'a> {
     pub(crate) workset: &'a Workset,
     pub(crate) base_path: &'a Path,
-    pub(crate) config: &'a Config,
+    pub(crate) config: std::sync::Arc<Config>,
     pub(crate) channel_id: &'a str,
     pub(crate) system_prompt: &'a str,
-}
-
-enum StepExecutionDirective {
-    Continue {
-        step: ExecutionStepKind,
-        output: String,
-    },
-    Finish {
-        step: ExecutionStepKind,
-        final_state: ExecutionFinalState,
-        user_response: String,
-    },
-}
-
-async fn execute_call_tool_step(
-    call: ToolCallSpec,
-    ctx: &PlanExecutionContext<'_>,
-) -> StepExecutionDirective {
-    let tool_name = call.tool_name.clone();
-    let result = dispatch_tool(
-        &tool_name,
-        &call.args,
-        ctx.base_path,
-        ctx.config,
-        ctx.channel_id,
-    )
-    .await;
-
-    if result.is_error {
-        return StepExecutionDirective::Finish {
-            step: ExecutionStepKind::CalledTool {
-                tool_name: tool_name.clone(),
-                succeeded: false,
-            },
-            final_state: ExecutionFinalState::Failed,
-            user_response: tool_failure_response(&tool_name, &result.output),
-        };
-    }
-
-    StepExecutionDirective::Continue {
-        step: ExecutionStepKind::CalledTool {
-            tool_name,
-            succeeded: true,
-        },
-        output: result.output,
-    }
 }
 
 fn build_respond_prompt(
@@ -179,7 +133,7 @@ async fn execute_respond_step(
     user_text: &str,
     last_output: Option<String>,
     ctx: &PlanExecutionContext<'_>,
-) -> Result<StepExecutionDirective> {
+) -> Result<(ExecutionStepKind, ExecutionFinalState, String)> {
     let observation = last_output.clone().unwrap_or_default();
     let response_prompt = build_respond_prompt(user_text, &observation, style, guidance);
 
@@ -196,31 +150,31 @@ async fn execute_respond_step(
     )
     .await?
     {
-        llm::ModelTurn::Narrative(result) => Ok(StepExecutionDirective::Finish {
-            step: ExecutionStepKind::Responded { style },
-            final_state: ExecutionFinalState::Completed,
-            user_response: result,
-        }),
-        llm::ModelTurn::ToolCalls { .. } => Ok(StepExecutionDirective::Finish {
-            step: ExecutionStepKind::RespondFallback { style },
-            final_state: ExecutionFinalState::Completed,
-            user_response: respond_step_fallback(last_output),
-        }),
+        llm::ModelTurn::Narrative(result) => Ok((
+            ExecutionStepKind::Responded { style },
+            ExecutionFinalState::Completed,
+            result,
+        )),
+        llm::ModelTurn::ToolCalls { .. } => Ok((
+            ExecutionStepKind::RespondFallback { style },
+            ExecutionFinalState::Completed,
+            respond_step_fallback(last_output),
+        )),
     }
 }
 
 fn execute_ask_for_missing_step(
     fields: Vec<String>,
     prompt: Option<String>,
-) -> StepExecutionDirective {
-    StepExecutionDirective::Finish {
-        step: ExecutionStepKind::RequestedMissingInput {
+) -> (ExecutionStepKind, ExecutionFinalState, String) {
+    (
+        ExecutionStepKind::RequestedMissingInput {
             prompt_only: fields.is_empty(),
             fields: fields.clone(),
         },
-        final_state: ExecutionFinalState::NeedsInput,
-        user_response: ask_for_missing_response(&fields, prompt.as_deref()),
-    }
+        ExecutionFinalState::NeedsInput,
+        ask_for_missing_response(&fields, prompt.as_deref()),
+    )
 }
 
 fn finish_rejected_route(reason: String) -> ExecutionOutcome {
@@ -238,9 +192,9 @@ async fn execute_step(
     user_text: &str,
     last_output: Option<String>,
     ctx: &PlanExecutionContext<'_>,
-) -> Result<StepExecutionDirective> {
+) -> Result<(ExecutionStepKind, ExecutionFinalState, String)> {
     match step {
-        PlanStep::CallTool { call } => Ok(execute_call_tool_step(call, ctx).await),
+        PlanStep::CallTool { .. } => unreachable!("CallTool steps are batched in execute_plan"),
         PlanStep::Respond { style, guidance } => {
             execute_respond_step(style, guidance, user_text, last_output, ctx).await
         }
@@ -272,22 +226,88 @@ async fn execute_plan(
     let mut state = PlanExecutionState::new(intent, confidence);
     let user_text = ctx.workset.text();
 
+    let mut tool_batch = Vec::new();
+
     for step in steps {
-        match execute_step(step, &user_text, state.last_output(), &ctx).await? {
-            StepExecutionDirective::Continue { step, output } => {
-                state.apply_continue(step, output);
-            }
-            StepExecutionDirective::Finish {
-                step,
-                final_state,
-                user_response,
-            } => {
-                return Ok(state.finish_with_step(step, final_state, user_response));
-            }
+        if let PlanStep::CallTool { call } = step {
+            tool_batch.push(call);
+        } else {
+            if !tool_batch.is_empty()
+                && let Err((step_kind, final_state, response)) = flush_tool_batch(&mut tool_batch, &mut state, &ctx).await {
+                    return Ok(state.finish_with_step(step_kind, final_state, response));
+                }
+
+            let (step_kind, final_state, user_response) = execute_step(step, &user_text, state.last_output(), &ctx).await?;
+            return Ok(state.finish_with_step(step_kind, final_state, user_response));
         }
     }
 
+    if !tool_batch.is_empty()
+        && let Err((step_kind, final_state, response)) = flush_tool_batch(&mut tool_batch, &mut state, &ctx).await {
+            return Ok(state.finish_with_step(step_kind, final_state, response));
+        }
+
     Ok(state.finish_with_last_output())
+}
+
+async fn flush_tool_batch(
+    batch: &mut Vec<ToolCallSpec>,
+    state: &mut PlanExecutionState,
+    ctx: &PlanExecutionContext<'_>,
+) -> Result<(), (ExecutionStepKind, ExecutionFinalState, String)> {
+    let mut futures = Vec::new();
+    for call in batch.iter() {
+        let tool_name = call.tool_name.clone();
+        let args = call.args.clone();
+        futures.push(async move {
+            let result = dispatch_tool(
+                &tool_name,
+                &args,
+                ctx.base_path,
+                &ctx.config,
+                ctx.channel_id,
+            )
+            .await;
+            (tool_name, result)
+        });
+    }
+
+    let results = futures_util::future::join_all(futures).await;
+
+    let mut combined_output = String::new();
+    let batch_len = batch.len();
+
+    for (tool_name, result) in results {
+        if result.is_error {
+            let response = tool_failure_response(&tool_name, &result.output);
+            batch.clear();
+            return Err((
+                ExecutionStepKind::CalledTool {
+                    tool_name,
+                    succeeded: false,
+                },
+                ExecutionFinalState::Failed,
+                response,
+            ));
+        }
+
+        if batch_len > 1 {
+            combined_output.push_str(&format!("### Result from `{}`\n{}\n\n", tool_name, result.output));
+        } else {
+            combined_output = result.output;
+        }
+
+        state.apply_continue(
+            ExecutionStepKind::CalledTool {
+                tool_name,
+                succeeded: true,
+            },
+            combined_output.clone(),
+        );
+    }
+
+    batch.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,7 +341,7 @@ mod tests {
         PlanExecutionContext {
             workset,
             base_path,
-            config,
+            config: std::sync::Arc::new(config.clone()),
             channel_id: "0",
             system_prompt: "test system prompt",
         }

@@ -175,7 +175,7 @@ async fn run_install_skill(guild_path: &Path, skill_path: &Path, force: bool) ->
         bail!("Gemini API key and model must be configured before installing a skill");
     }
 
-    let skill_md_content = fs::read_to_string(&skill_md)
+    let skill_md_content = tokio::fs::read_to_string(&skill_md).await
         .with_context(|| format!("failed to read {}", skill_md.display()))?;
     let tree = collect_skill_tree(&skill_dir)?;
     let prompt = build_skill_install_prompt(&skill_md_content, &tree);
@@ -209,7 +209,7 @@ async fn run_install_skill(guild_path: &Path, skill_path: &Path, force: bool) ->
 
     let rendered =
         serde_json::to_string_pretty(&compiled).context("failed to serialize SKILL.json")?;
-    fs::write(&target, rendered)
+    tokio::fs::write(&target, rendered).await
         .with_context(|| format!("failed to write {}", target.display()))?;
 
     println!(
@@ -346,8 +346,8 @@ fn validate_installed_skill(skill: &InstalledSkill) -> Result<()> {
 }
 
 fn save_config(path: &Path, config: &Config) -> Result<()> {
-    let yaml = serde_yaml::to_string(config).context("failed to serialize config")?;
-    fs::write(path, yaml).with_context(|| format!("failed to write {}", path.display()))
+    let yaml = serde_yml::to_string(config).context("failed to serialize config")?;
+    std::fs::write(path, yaml).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn needs_value(value: &str) -> bool {
@@ -431,7 +431,7 @@ fn install_linux_service(guild_path: &Path) -> Result<()> {
     fs::create_dir_all(&systemd_dir).context("failed to create systemd user directory")?;
 
     let service_path = systemd_dir.join("tellar.service");
-    fs::write(&service_path, rendered)
+    std::fs::write(&service_path, rendered)
         .with_context(|| format!("failed to write {}", service_path.display()))?;
     println!("Installed service file at {}", service_path.display());
 
@@ -580,7 +580,7 @@ fn extract_dir_contents(dir: &Dir, target: &Path, force: bool) -> Result<Extract
                     stats.created_files += 1;
                 }
 
-                fs::write(&target_file, file.contents())
+                std::fs::write(&target_file, file.contents())
                     .with_context(|| format!("failed to write {}", target_file.display()))?;
             }
         }
@@ -632,8 +632,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let current_exe = dir.path().join("tellarctl");
         let tellar = dir.path().join("tellar");
-        fs::write(&current_exe, "").unwrap();
-        fs::write(&tellar, "").unwrap();
+        std::fs::write(&current_exe, "").unwrap();
+        std::fs::write(&tellar, "").unwrap();
 
         let resolved = resolve_tellar_binary_from_current_exe(&current_exe).unwrap();
         assert_eq!(resolved, tellar);
@@ -643,7 +643,7 @@ mod tests {
     fn test_resolve_tellar_binary_from_current_exe_errors_when_missing() {
         let dir = tempdir().unwrap();
         let current_exe = dir.path().join("tellarctl");
-        fs::write(&current_exe, "").unwrap();
+        std::fs::write(&current_exe, "").unwrap();
 
         let err = resolve_tellar_binary_from_current_exe(&current_exe).unwrap_err();
         assert!(format!("{}", err).contains("could not find the `tellar` binary"));
@@ -658,16 +658,16 @@ mod tests {
         assert!(first.created_files > 0);
 
         let existing_path = dir.path().join("agents").join("AGENTS.md");
-        let original = fs::read_to_string(&existing_path).unwrap();
-        fs::write(&existing_path, "customized").unwrap();
+        let original = std::fs::read_to_string(&existing_path).unwrap();
+        std::fs::write(&existing_path, "customized").unwrap();
 
         let second = extract_dir_contents(guild_dir, dir.path(), false).unwrap();
         assert_eq!(second.created_files, 0);
         assert_eq!(second.overwritten_files, 0);
         assert!(second.skipped_files > 0);
-        assert_eq!(fs::read_to_string(&existing_path).unwrap(), "customized");
+        assert_eq!(std::fs::read_to_string(&existing_path).unwrap(), "customized");
 
-        fs::write(&existing_path, original).unwrap();
+        std::fs::write(&existing_path, original).unwrap();
     }
 
     #[test]
@@ -678,13 +678,13 @@ mod tests {
         extract_dir_contents(guild_dir, dir.path(), false).unwrap();
 
         let existing_path = dir.path().join("agents").join("AGENTS.md");
-        let original = fs::read_to_string(&existing_path).unwrap();
-        fs::write(&existing_path, "customized").unwrap();
+        let original = std::fs::read_to_string(&existing_path).unwrap();
+        std::fs::write(&existing_path, "customized").unwrap();
 
         let stats = extract_dir_contents(guild_dir, dir.path(), true).unwrap();
         assert_eq!(stats.created_files, 0);
         assert!(stats.overwritten_files > 0);
-        assert_eq!(fs::read_to_string(&existing_path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&existing_path).unwrap(), original);
     }
 
     #[cfg(unix)]

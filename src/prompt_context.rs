@@ -5,6 +5,7 @@
  */
 
 use once_cell::sync::Lazy;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,18 +40,16 @@ pub(crate) fn load_unified_prompt(base_path: &Path, channel_id: &str) -> String 
         .read()
         .ok()
         .and_then(|cache| cache.get(&cache_key).cloned())
-    {
-        if cached.base_modified == base_modified && cached.channel_modified == channel_modified {
+        && cached.base_modified == base_modified && cached.channel_modified == channel_modified {
             return cached.prompt;
         }
-    }
 
-    let mut system_prompt = fs::read_to_string(base_prompt_path)
+    let mut system_prompt = std::fs::read_to_string(base_prompt_path)
         .unwrap_or_else(|_| "You are Tellar, a cyber steward.".to_string());
 
-    if let Some(channel_prompt_path) = channel_prompt_path {
-        if channel_prompt_path.exists() {
-            if let Ok(channel_prompt) = fs::read_to_string(channel_prompt_path) {
+    if let Some(channel_prompt_path) = channel_prompt_path
+        && channel_prompt_path.exists()
+            && let Ok(channel_prompt) = std::fs::read_to_string(channel_prompt_path) {
                 println!(
                     "🎭 Loading channel-specific identity for ID: {}",
                     channel_id
@@ -58,8 +57,6 @@ pub(crate) fn load_unified_prompt(base_path: &Path, channel_id: &str) -> String 
                 system_prompt.push_str("\n\n### Channel-Specific Identity:\n");
                 system_prompt.push_str(&channel_prompt);
             }
-        }
-    }
 
     if let Ok(mut cache) = PROMPT_CACHE.write() {
         cache.insert(
@@ -77,20 +74,20 @@ pub(crate) fn load_unified_prompt(base_path: &Path, channel_id: &str) -> String 
 
 #[cfg(test)]
 use crate::llm;
+
 #[cfg(test)]
-use regex::Regex;
+static AUTHOR_TIME_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"(?s)\*\*Author\*\*: (.*?) \| \*\*Time\*\*.*?\n\n(.*?)\n").unwrap());
 
 /// Reread the blackboard and inject any NEW messages into the history
 #[cfg(test)]
 pub(crate) async fn update_history_with_steering(
     messages: &mut Vec<llm::Message>,
-    path: &Path,
+    path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let current_content = fs::read_to_string(path).unwrap_or_default();
+    let current_content = std::fs::read_to_string(path).unwrap_or_default();
 
-    let re_author = Regex::new(r"(?s)\*\*Author\*\*: (.*?) \| \*\*Time\*\*.*?\n\n(.*?)\n").unwrap();
     let mut blackboard_user_messages = Vec::new();
-    for caps in re_author.captures_iter(&current_content) {
+    for caps in AUTHOR_TIME_RE.captures_iter(&current_content) {
         let author = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
         if !author.contains("Tellar") {
@@ -131,7 +128,7 @@ mod tests {
     async fn test_steering_detection() -> anyhow::Result<()> {
         let path = std::env::current_dir()?.join("test_blackboard.md");
 
-        fs::write(&path, "**Author**: User1 | **Time**: 12:00\n\nHello\n")?;
+        std::fs::write(&path, "**Author**: User1 | **Time**: 12:00\n\nHello\n")?;
 
         let mut messages = vec![llm::Message {
             role: llm::MessageRole::User,
@@ -141,7 +138,7 @@ mod tests {
         update_history_with_steering(&mut messages, &path).await?;
         assert_eq!(messages.len(), 1);
 
-        fs::write(
+        std::fs::write(
             &path,
             "**Author**: User1 | **Time**: 12:00\n\nHello\n\n---\n**Author**: User1 | **Time**: 12:01\n\nSTOP!\n",
         )?;

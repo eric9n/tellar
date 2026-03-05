@@ -53,13 +53,11 @@ impl EventHandler for Inscriber {
                     .resolve_physical_folder(&channel_id_str)
                     .unwrap_or_else(|| channel_id_str.clone());
 
-                if resolved == channel_id_str {
-                    if let Ok(channel) = ctx.http.get_channel(msg.channel_id.into()).await {
-                        if let Some(guild_ch) = channel.guild() {
+                if resolved == channel_id_str
+                    && let Ok(channel) = ctx.http.get_channel(msg.channel_id).await
+                        && let Some(guild_ch) = channel.guild() {
                             resolved = to_folder_name(&guild_ch.name, &channel_id_str);
                         }
-                    }
-                }
 
                 println!(
                     "🔍 Dynamically mapped channel: #{} -> {}",
@@ -159,8 +157,8 @@ impl EventHandler for Inscriber {
                 );
             }
         } else if let Some(referenced) = &msg.referenced_message {
-            if referenced.author.bot && referenced.content.contains("[Thread: ") {
-                if let Some(pos) = referenced.content.find("[Thread: ") {
+            if referenced.author.bot && referenced.content.contains("[Thread: ")
+                && let Some(pos) = referenced.content.find("[Thread: ") {
                     let start = pos + 9;
                     if let Some(end) = referenced.content[start..].find(']') {
                         let thread_id = &referenced.content[start..start + end];
@@ -187,7 +185,6 @@ impl EventHandler for Inscriber {
                         }
                     }
                 }
-            }
         } else {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let daily_file = format!("{}.md", today);
@@ -336,7 +333,7 @@ impl Inscriber {
         }
         let brain_event_path = brain_dir.join(format!("event_{}.json", event.id));
         if let Ok(json_data) = serde_json::to_string(event) {
-            let _ = fs::write(brain_event_path, json_data);
+            let _ = std::fs::write(brain_event_path, json_data);
         }
     }
 
@@ -355,12 +352,12 @@ impl Inscriber {
                 for file_entry in fs::read_dir(path)? {
                     let file_entry = file_entry?;
                     let file_path = file_entry.path();
-                    if file_path.extension().and_then(|s| s.to_str()) == Some("md") {
-                        if let Ok(content) = fs::read_to_string(&file_path) {
-                            if content.contains(&pattern) {
+                    if file_path.extension().and_then(|s| s.to_str()) == Some("md")
+                        && let Ok(content) = std::fs::read_to_string(&file_path)
+                            && content.contains(&pattern) {
                                 let new_content = self.remove_message_block(&content, &pattern);
                                 if new_content != content {
-                                    fs::write(&file_path, new_content)?;
+                                    std::fs::write(&file_path, new_content)?;
                                     println!(
                                         "✂️ Scrubbed message {} from {:?}",
                                         message_id,
@@ -368,8 +365,6 @@ impl Inscriber {
                                     );
                                 }
                             }
-                        }
-                    }
                 }
             }
         }
@@ -428,13 +423,11 @@ pub fn resolve_folder_by_id(workspace_path: &Path, channel_id: &str) -> Option<S
     let channels_dir = workspace_path.join("channels");
     if let Ok(entries) = fs::read_dir(channels_dir) {
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if extract_id_from_folder(name).as_deref() == Some(suffix) {
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str()
+                    && extract_id_from_folder(name).as_deref() == Some(suffix) {
                         return Some(name.to_string());
                     }
-                }
-            }
         }
     }
     None
@@ -527,17 +520,15 @@ pub async fn sync_discord_event(
     }
 
     let mut thread_path = None;
-    if let Ok(entries) = fs::read_dir(&target_dir) {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir(&target_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if content.contains(&format!("discord_event_id: \"{}\"", event_id)) {
+            if path.extension().and_then(|s| s.to_str()) == Some("md")
+                && let Ok(content) = tokio::fs::read_to_string(&path).await
+                    && content.contains(&format!("discord_event_id: \"{}\"", event_id)) {
                         thread_path = Some(path);
                         break;
                     }
-                }
-            }
         }
     }
 
@@ -589,7 +580,7 @@ Start Time (UTC): {}
         target_dir.join(format!("ritual_{}_{}.md", safe_name, event_id))
     });
 
-    fs::write(final_path, content)?;
+    tokio::fs::write(final_path, content).await?;
     println!("🌌 Ritual synchronized: {} (ID: {})", name, event_id);
 
     Ok(())
@@ -605,12 +596,12 @@ pub async fn sync_all_discord_events(
         return Ok(());
     }
 
-    for entry in fs::read_dir(brain_dir)? {
-        let entry = entry?;
+    if let Ok(mut entries) = tokio::fs::read_dir(brain_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+        if path.extension().and_then(|s| s.to_str()) == Some("json")
+            && let Ok(content) = tokio::fs::read_to_string(&path).await
+                && let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
                     let event_id = data["id"].as_str().unwrap_or("");
                     let name = data["name"].as_str().unwrap_or("");
                     let start_time = data["scheduled_start_time"].as_str().unwrap_or("");
@@ -622,7 +613,6 @@ pub async fn sync_all_discord_events(
                     )
                     .await;
                 }
-            }
         }
     }
     Ok(())

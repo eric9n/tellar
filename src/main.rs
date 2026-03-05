@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("💡 Please run 'tellarctl setup' to configure your API keys.");
         std::process::exit(1);
     }
-    let config = Config::load(&config_file)?;
+    let config = Arc::new(Config::load(&config_file)?);
 
     // 3. Start Steward
     println!("🌳 Guild: {}", guild_path.display());
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     // 5. [Perception Layer] Start Discord Inscriber
     let (notif_tx, notif_rx) = tokio::sync::mpsc::channel::<StewardNotification>(100);
 
-    let config_discord = config.clone();
+    let config_discord = Arc::clone(&config);
     let guild_discord = guild_path.clone();
     let mappings_listener = shared_mappings.clone();
     let notif_tx_discord = notif_tx.clone();
@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 7. [Orchestration Layer] Mount The Watchman
     let base_path_watch = guild_path.clone();
-    let config_watch = config.clone();
+    let config_watch = Arc::clone(&config);
 
     // Keep a clone of the transmitter alive so the receiver doesn't close if Discord fails
     let _tx_keepalive = notif_tx.clone();
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     // Watchman is the main synchronous orchestrator now
     if let Err(e) = watch::start_watchman(
         &base_path_watch,
-        &config_watch,
+        config_watch,
         notif_rx,
         shared_mappings.clone(),
     )

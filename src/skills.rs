@@ -155,7 +155,7 @@ fn discover_skills_uncached(base_path: &Path) -> Vec<(SkillMetadata, PathBuf)> {
 
 impl SkillMetadata {
     pub fn from_installed_file(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path)?;
         let installed: InstalledSkill = serde_json::from_str(&content)?;
 
         let mut tools = HashMap::new();
@@ -178,7 +178,7 @@ impl SkillMetadata {
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path)?;
 
         // Very basic Markdown Frontmatter parser
         if !content.starts_with("---") {
@@ -190,7 +190,7 @@ impl SkillMetadata {
             return Err(anyhow!("Invalid SKILL.md format"));
         }
 
-        let mut meta: SkillMetadata = serde_yaml::from_str(parts[1])?;
+        let mut meta: SkillMetadata = serde_yml::from_str(parts[1])?;
         meta.guidance = parts[2].trim().to_string();
 
         // If name is missing, use directory name
@@ -214,11 +214,9 @@ impl SkillMetadata {
             .read()
             .ok()
             .and_then(|cache| cache.get(&cache_key).cloned())
-        {
-            if cached.stamp == stamp {
+            && cached.stamp == stamp {
                 return cached.skills;
             }
-        }
 
         let skills = discover_skills_uncached(base_path);
         if let Ok(mut cache) = SKILL_DISCOVERY_CACHE.write() {
@@ -574,7 +572,7 @@ mod tests {
     fn test_skill_metadata_parses_minimal_tool_schema() {
         let dir = tempdir().unwrap();
         let skill_md = dir.path().join("SKILL.md");
-        fs::write(
+        std::fs::write(
             &skill_md,
             r#"---
 name: sample
@@ -602,7 +600,7 @@ Body
     fn test_skill_metadata_parses_installed_skill_json() {
         let dir = tempdir().unwrap();
         let skill_json = dir.path().join("SKILL.json");
-        fs::write(
+        std::fs::write(
             &skill_json,
             r#"{
   "name": "sample",
@@ -664,7 +662,7 @@ Body
         let guild = tempdir().unwrap();
         let skill_dir = guild.path().join("skills").join("sample");
         fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
+        std::fs::write(
             skill_dir.join("SKILL.md"),
             r#"---
 name: sample

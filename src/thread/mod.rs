@@ -43,7 +43,7 @@ static PENDING_TODO_RE: Lazy<Regex> =
 pub async fn execute_thread_file(
     path: &PathBuf,
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     trigger_id: Option<String>,
     target_channel_id: Option<String>,
     target_guild_id: Option<String>,
@@ -75,7 +75,7 @@ pub async fn execute_thread_file(
         let result = execute_thread_file_internal(
             path,
             base_path,
-            config,
+            Arc::clone(&config),
             trigger_id,
             target_channel_id,
             target_guild_id,
@@ -107,15 +107,29 @@ pub async fn execute_thread_file(
     res
 }
 
+static FILE_LOCKS: Lazy<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn get_file_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = FILE_LOCKS.lock().unwrap();
+    locks
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 async fn execute_thread_file_internal(
     path: &PathBuf,
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     trigger_id: Option<String>,
     target_channel_id: Option<String>,
     _target_guild_id: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut content = fs::read_to_string(path)?;
+    let file_lock = get_file_lock(path);
+    let _guard = file_lock.lock().await;
+
+    let mut content = tokio::fs::read_to_string(path).await?;
 
     let is_log = is_conversational_log(path);
     let thread_id = path
@@ -154,7 +168,7 @@ async fn execute_thread_file_internal(
                 &content,
                 path,
                 base_path,
-                config,
+                Arc::clone(&config),
                 &channel_id,
             )
             .await
@@ -164,7 +178,7 @@ async fn execute_thread_file_internal(
                     eprintln!("❌ Error executing task in #{}: {}", thread_id, e);
                     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                     content = append_internal_task_error_log(&content, &timestamp, &e.to_string());
-                    fs::write(path, &content)?;
+                    tokio::fs::write(path, &content).await?;
                     break;
                 }
             };
@@ -175,9 +189,9 @@ async fn execute_thread_file_internal(
             content = next_content;
 
             if completed {
-                fs::write(path, &content)?;
+                tokio::fs::write(path, &content).await?;
 
-                let sanitized_result = mask_sensitive_data(&outcome.user_response, config);
+                let sanitized_result = mask_sensitive_data(&outcome.user_response, &config);
                 if let Err(e) = discord_client::send_bot_message(
                     &config.discord.token,
                     &channel_id,
@@ -194,7 +208,7 @@ async fn execute_thread_file_internal(
                     );
                 }
             } else {
-                fs::write(path, &content)?;
+                tokio::fs::write(path, &content).await?;
                 break;
             }
         }
@@ -202,7 +216,7 @@ async fn execute_thread_file_internal(
         println!("🗣️ Conversational Mode in #{}...", thread_id);
         let _ = discord_client::broadcast_typing(&config.discord.token, &channel_id).await;
 
-        match run_conversational_loop(&content, path, base_path, config, trigger_id, &channel_id)
+        match run_conversational_loop(&content, path, base_path, Arc::clone(&config), trigger_id, &channel_id)
             .await
         {
             Ok(outcome) => {
@@ -212,7 +226,7 @@ async fn execute_thread_file_internal(
                     outcome.log_summary()
                 );
 
-                let sanitized_result = mask_sensitive_data(&outcome.user_response, config);
+                let sanitized_result = mask_sensitive_data(&outcome.user_response, &config);
                 match discord_client::send_bot_message(
                     &config.discord.token,
                     &channel_id,
@@ -230,7 +244,7 @@ async fn execute_thread_file_internal(
                             &msg.id.to_string(),
                             &outcome.user_response,
                         );
-                        if let Err(error) = fs::write(path, &content) {
+                        if let Err(error) = tokio::fs::write(path, &content).await {
                             eprintln!(
                                 "⚠️ Failed to persist Discord-backed response log for {:?}: {:?}",
                                 path.file_name(),
@@ -249,7 +263,7 @@ async fn execute_thread_file_internal(
                             &timestamp.to_string(),
                             &outcome.user_response,
                         );
-                        if let Err(error) = fs::write(path, &content) {
+                        if let Err(error) = tokio::fs::write(path, &content).await {
                             eprintln!(
                                 "⚠️ Failed to persist local fallback response log for {:?}: {:?}",
                                 path.file_name(),
@@ -264,7 +278,7 @@ async fn execute_thread_file_internal(
                 let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
                 content =
                     append_processing_error_log(&content, &timestamp.to_string(), &e.to_string());
-                if let Err(error) = fs::write(path, &content) {
+                if let Err(error) = tokio::fs::write(path, &content).await {
                     eprintln!(
                         "⚠️ Failed to persist processing error log for {:?}: {:?}",
                         path.file_name(),
@@ -288,9 +302,9 @@ async fn execute_thread_file_internal(
         }
     }
 
-    if let Some(header) = header_owned {
-        if should_archive_thread(&content, header.schedule.as_deref()) {
-            if let Some(parent) = path.parent() {
+    if let Some(header) = header_owned
+        && should_archive_thread(&content, header.schedule.as_deref())
+            && let Some(parent) = path.parent() {
                 let today = Local::now().format("%Y-%m-%d").to_string();
                 let history_dir = parent.join("history").join(&today);
                 let _ = fs::create_dir_all(&history_dir);
@@ -319,8 +333,6 @@ async fn execute_thread_file_internal(
                     }
                 }
             }
-        }
-    }
 
     Ok(())
 }

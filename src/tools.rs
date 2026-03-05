@@ -370,7 +370,7 @@ pub(crate) fn run_grep_tool(args: &Value, base_path: &Path) -> ToolExecutionResu
         if !path.is_file() {
             continue;
         }
-        let Ok(content) = fs::read_to_string(&path) else {
+        let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
 
@@ -510,6 +510,7 @@ async fn run_exec_tool(args: &Value, base_path: &Path, config: &Config) -> ToolE
 
     let output = match config.runtime.exec_mode {
         crate::config::ExecMode::Unrestricted => {
+            println!("🔴 [AUDIT] Executing host command: {}", command);
             Command::new("sh")
                 .arg("-lc")
                 .arg(command)
@@ -530,7 +531,7 @@ async fn run_exec_tool(args: &Value, base_path: &Path, config: &Config) -> ToolE
             }
             if !stderr.trim().is_empty() {
                 if !combined.is_empty() {
-                    combined.push_str("\n");
+                    combined.push('\n');
                 }
                 combined.push_str("[stderr]\n");
                 combined.push_str(stderr.trim_end());
@@ -571,7 +572,7 @@ fn run_read_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
         return ToolExecutionResult::error(format!("Error: File not found: {}", rel_path));
     }
 
-    match fs::read_to_string(&file_path) {
+    match std::fs::read_to_string(&file_path) {
         Ok(content) => {
             let lines: Vec<&str> = content.lines().collect();
             if offset > lines.len() {
@@ -604,7 +605,7 @@ fn run_write_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
         let _ = fs::create_dir_all(parent);
     }
 
-    match fs::write(&full_path, content) {
+    match std::fs::write(&full_path, content) {
         Ok(_) => ToolExecutionResult::success(format!("Successfully wrote to {}", rel_path)),
         Err(error) => ToolExecutionResult::error(format!("Error writing file: {}", error)),
     }
@@ -625,12 +626,12 @@ fn run_edit_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
     };
     let file_path = base_path.join(rel_path);
 
-    match fs::read_to_string(&file_path) {
+    match std::fs::read_to_string(&file_path) {
         Ok(content) => {
             let occurrences: Vec<_> = content.matches(old_text).collect();
             if occurrences.len() == 1 {
                 let new_content = content.replace(old_text, new_text);
-                match fs::write(&file_path, new_content) {
+                match std::fs::write(&file_path, new_content) {
                     Ok(_) => {
                         ToolExecutionResult::success(format!("Successfully edited {}", rel_path))
                     }
@@ -655,12 +656,34 @@ fn run_edit_tool(args: &Value, base_path: &Path) -> ToolExecutionResult {
 pub fn mask_sensitive_data(text: &str, config: &Config) -> String {
     let mut masked = text.to_string();
 
-    if !config.gemini.api_key.is_empty() && config.gemini.api_key.len() > 10 {
-        masked = masked.replace(&config.gemini.api_key, "[REDACTED_GEMINI_KEY]");
-    }
+    let secrets = [
+        (&config.gemini.api_key, "[REDACTED_GEMINI_KEY]"),
+        (&config.discord.token, "[REDACTED_DISCORD_TOKEN]"),
+    ];
 
-    if !config.discord.token.is_empty() && config.discord.token.len() > 10 {
-        masked = masked.replace(&config.discord.token, "[REDACTED_DISCORD_TOKEN]");
+    for (secret, replacement) in secrets {
+        if secret.len() > 10 {
+            // Full match
+            masked = masked.replace(secret, replacement);
+
+            // Simple prefix match (first 12 chars) to catch truncated logs or substrings
+            let prefix = &secret[..12];
+            if masked.contains(prefix) {
+                // Not ideal, simple replace. We don't want to replace tiny prefixes. 12 is usually safe.
+                masked = masked.replace(prefix, replacement);
+            }
+
+            // Simple base64 match check
+            use base64::{engine::general_purpose, Engine as _};
+            let b64 = general_purpose::STANDARD.encode(secret);
+            masked = masked.replace(&b64, replacement);
+            
+            // Also base64 without padding which LLMs might generate occasionally
+            let b64_no_pad = b64.trim_end_matches('=');
+            if b64_no_pad.len() > 10 {
+                 masked = masked.replace(b64_no_pad, replacement);
+            }
+        }
     }
 
     masked
@@ -867,7 +890,7 @@ mod tests {
     fn write_test_skill(base_path: &Path, dir_name: &str, skill_name: &str, tool_name: &str) {
         let skill_dir = base_path.join("skills").join(dir_name);
         fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
+        std::fs::write(
             skill_dir.join("SKILL.json"),
             json!({
                 "name": skill_name,
@@ -959,12 +982,12 @@ mod tests {
     fn test_find_ls_and_grep_tools_work_without_shell() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("docs")).unwrap();
-        fs::write(
+        std::fs::write(
             dir.path().join("docs").join("alpha.txt"),
             "hello\nfind me\n",
         )
         .unwrap();
-        fs::write(dir.path().join("docs").join("beta.txt"), "nothing\n").unwrap();
+        std::fs::write(dir.path().join("docs").join("beta.txt"), "nothing\n").unwrap();
 
         let find_result = run_find_tool(&json!({ "name": "alpha", "path": "docs" }), dir.path());
         assert!(!find_result.is_error);
@@ -1003,7 +1026,7 @@ mod tests {
     #[test]
     fn test_read_tool_rejects_offset_beyond_file_length() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("notes.txt"), "line1\nline2\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "line1\nline2\n").unwrap();
 
         let result = run_read_tool(&json!({ "path": "notes.txt", "offset": 3 }), dir.path());
         assert!(result.is_error);
@@ -1013,7 +1036,7 @@ mod tests {
     #[test]
     fn test_edit_tool_rejects_non_unique_match() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("notes.txt"), "same\nsame\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "same\nsame\n").unwrap();
 
         let result = run_edit_tool(
             &json!({
@@ -1033,7 +1056,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let outside = tempdir().unwrap();
         let escape_target = outside.path().join("outside.txt");
-        fs::write(&escape_target, "secret").unwrap();
+        std::fs::write(&escape_target, "secret").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&escape_target, dir.path().join("escape.txt")).unwrap();
         #[cfg(windows)]

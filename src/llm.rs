@@ -5,7 +5,7 @@ use serde_json::json;
 
 static POOLED_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .user_agent("google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .user_agent("Tellar/0.1")
         .build()
         .expect("Failed to create pooled reqwest client")
 });
@@ -67,15 +67,18 @@ pub enum ModelTurn {
     },
 }
 
+static CALL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"call:([A-Za-z_][A-Za-z0-9_-]*)(?:\s*(\{.*\}))?").ok().unwrap());
+static KEY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"([{\s,])([A-Za-z_][A-Za-z0-9_]*)\s*:"#).ok().unwrap());
+
 fn parse_pseudo_function_call(raw: &str) -> Option<ToolCallRequest> {
-    let call_re = Regex::new(r"call:([A-Za-z_][A-Za-z0-9_-]*)(?:\s*(\{.*\}))?").ok()?;
-    let caps = call_re.captures(raw)?;
+    let caps = CALL_RE.captures(raw)?;
     let name = caps.get(1)?.as_str().to_string();
 
     let args = if let Some(arg_match) = caps.get(2) {
         let raw_args = arg_match.as_str();
-        let key_re = Regex::new(r#"([{\s,])([A-Za-z_][A-Za-z0-9_]*)\s*:"#).ok()?;
-        let normalized = key_re.replace_all(raw_args, "$1\"$2\":");
+        let normalized = KEY_RE.replace_all(raw_args, "$1\"$2\":");
         serde_json::from_str::<serde_json::Value>(&normalized).ok()?
     } else {
         json!({})
@@ -186,8 +189,8 @@ pub async fn generate_turn(
     tools: Option<serde_json::Value>,
 ) -> anyhow::Result<ModelTurn> {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        model
     );
 
     // Map MessageRole to Gemini roles
@@ -223,9 +226,10 @@ pub async fn generate_turn(
 
     let response = POOLED_CLIENT
         .post(url)
+        .header("x-goog-api-key", api_key)
         .header(
             "X-Goog-Api-Client",
-            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            "Tellar/0.1",
         )
         .json(&payload)
         .send()
@@ -304,9 +308,7 @@ pub async fn generate_turn(
         .as_str()
         .unwrap_or("UNKNOWN");
     let msg = if reason == "SAFETY" {
-        format!(
-            "Gemini blocked the response due to SAFETY filters. Check your prompt or history context."
-        )
+        "Gemini blocked the response due to SAFETY filters. Check your prompt or history context.".to_string()
     } else {
         format!(
             "Gemini returned no content. Finish Reason: {}. Response: {}",
@@ -319,16 +321,14 @@ pub async fn generate_turn(
 
 /// Fetch available models from Gemini API
 pub async fn list_models(api_key: &str) -> anyhow::Result<Vec<String>> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-        api_key
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/models";
 
     let response = POOLED_CLIENT
         .get(url)
+        .header("x-goog-api-key", api_key)
         .header(
             "X-Goog-Api-Client",
-            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            "Tellar/0.1",
         )
         .send()
         .await?;
@@ -348,14 +348,13 @@ pub async fn list_models(api_key: &str) -> anyhow::Result<Vec<String>> {
                 let short_name = name.strip_prefix("models/").unwrap_or(name);
 
                 // Filter for models that support generateContent
-                if let Some(methods) = m["supportedGenerationMethods"].as_array() {
-                    if methods
+                if let Some(methods) = m["supportedGenerationMethods"].as_array()
+                    && methods
                         .iter()
                         .any(|v| v.as_str() == Some("generateContent"))
                     {
                         models.push(short_name.to_string());
                     }
-                }
             }
         }
     }

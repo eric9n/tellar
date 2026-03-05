@@ -5,7 +5,7 @@
  */
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
+
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -66,10 +66,10 @@ use std::path::Path;
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = fs::read_to_string(path.as_ref())
+        let content = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file at {:?}", path.as_ref()))?;
         let config: Config =
-            serde_yaml::from_str(&content).context("Failed to parse config file")?;
+            serde_yml::from_str(&content).context("Failed to parse config file")?;
         Ok(config)
     }
 }

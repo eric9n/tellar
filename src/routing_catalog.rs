@@ -69,11 +69,9 @@ fn base_routing_catalog(base_path: &Path) -> CachedRoutingCatalog {
         .read()
         .ok()
         .and_then(|cache| cache.get(&cache_key).cloned())
-    {
-        if cached.skill_stamp == skill_stamp {
+        && cached.skill_stamp == skill_stamp {
             return cached;
         }
-    }
 
     let fresh = collect_uncached_routing_catalog(base_path);
     if let Ok(mut cache) = ROUTING_TOOL_CACHE.write() {
@@ -144,7 +142,7 @@ mod tests {
     fn write_skill(base: &Path, dir_name: &str, body: &str) {
         let skill_dir = base.join("skills").join(dir_name);
         fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     }
 
     fn test_config() -> Config {

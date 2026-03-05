@@ -55,8 +55,14 @@ pub async fn run_rhythm(base_path: &Path) -> anyhow::Result<()> {
     }
 
     // 1. Initial Scan
-    let mut initial_threads = Vec::new();
-    collect_thread_files(&rituals_dir, &mut initial_threads)?;
+    let rituals_dir_clone = rituals_dir.clone();
+    let initial_threads = tokio::task::spawn_blocking(move || {
+        let mut paths = Vec::new();
+        let _ = collect_thread_files(&rituals_dir_clone, &mut paths);
+        paths
+    })
+    .await
+    .unwrap_or_default();
 
     for path in initial_threads {
         let _ = sync_job_from_file(&path).await;
@@ -81,7 +87,7 @@ pub async fn sync_job_from_file(path: &PathBuf) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let content = match fs::read_to_string(path) {
+    let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
@@ -114,7 +120,7 @@ pub async fn sync_job_from_file(path: &PathBuf) -> anyhow::Result<()> {
                 Box::pin(async move {
                     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
 
-                    if let Ok(mut current_content) = fs::read_to_string(&path_exec) {
+                    if let Ok(mut current_content) = tokio::fs::read_to_string(&path_exec).await {
                         let block = format!(
                             "\n\n--- [Ghostly Injection: {}] ---\n{}",
                             timestamp, injection
@@ -124,7 +130,7 @@ pub async fn sync_job_from_file(path: &PathBuf) -> anyhow::Result<()> {
                         let updated =
                             current_content.replace("status: waiting_for_human", "status: active");
 
-                        if let Err(e) = fs::write(&path_exec, updated) {
+                        if let Err(e) = tokio::fs::write(&path_exec, updated).await {
                             eprintln!(
                                 "❌ Ghost failed to inscribe thread {:?}: {:?}",
                                 path_exec, e
@@ -175,7 +181,7 @@ fn parse_thread_metadata(content: &str) -> Option<(ThreadMetadata, &str)> {
     }
     let yaml_str = parts[1];
     let body = parts[2].trim();
-    if let Ok(header) = serde_yaml::from_str::<ThreadMetadata>(yaml_str) {
+    if let Ok(header) = serde_yml::from_str::<ThreadMetadata>(yaml_str) {
         Some((header, body))
     } else {
         None
@@ -230,10 +236,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let rituals = dir.path().join("rituals");
         fs::create_dir_all(rituals.join("history")).unwrap();
-        fs::write(rituals.join("KNOWLEDGE.md"), "").unwrap();
-        fs::write(rituals.join("2026-02-27.md"), "").unwrap();
-        fs::write(rituals.join("deploy.md"), "").unwrap();
-        fs::write(rituals.join("history").join("old.md"), "").unwrap();
+        std::fs::write(rituals.join("KNOWLEDGE.md"), "").unwrap();
+        std::fs::write(rituals.join("2026-02-27.md"), "").unwrap();
+        std::fs::write(rituals.join("deploy.md"), "").unwrap();
+        std::fs::write(rituals.join("history").join("old.md"), "").unwrap();
 
         let mut paths = Vec::new();
         collect_thread_files(&rituals, &mut paths).unwrap();

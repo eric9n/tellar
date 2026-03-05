@@ -15,10 +15,11 @@ use crate::router::plan_conversational_request;
 use crate::task_policy::apply_request_route_policy;
 use crate::task_response::no_new_workset_response;
 use std::path::Path;
+use std::sync::Arc;
 
 async fn resolve_task_route(
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     workset: &Workset,
     execution_label: &str,
     fallback_prompt: &str,
@@ -49,7 +50,7 @@ async fn resolve_task_route(
 async fn execute_task_route(
     workset: &Workset,
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     channel_id: &str,
     system_prompt: &str,
     execution_label: &str,
@@ -83,14 +84,14 @@ pub(crate) async fn execute_ritual_step(
     _full_context: &str,
     _path: &Path,
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     channel_id: &str,
 ) -> anyhow::Result<ExecutionOutcome> {
     let system_prompt_str = load_unified_prompt(base_path, channel_id);
     let ritual_workset = Workset::new(vec![task.to_string()]);
     let route = resolve_task_route(
         base_path,
-        config,
+        Arc::clone(&config),
         &ritual_workset,
         "Ritual",
         "This ritual step is not ready to execute. Provide the exact target or missing inputs.",
@@ -113,7 +114,7 @@ pub(crate) async fn run_conversational_loop(
     full_context: &str,
     _path: &Path,
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     trigger_id: Option<String>,
     channel_id: &str,
 ) -> anyhow::Result<ConversationalLoopOutcome> {
@@ -129,7 +130,7 @@ pub(crate) async fn run_conversational_loop(
     let system_prompt_str = load_unified_prompt(base_path, channel_id);
     let route = resolve_task_route(
         base_path,
-        config,
+        Arc::clone(&config),
         &workset,
         "Conversational",
         "This task is not ready to execute. Provide the exact target or missing inputs.",

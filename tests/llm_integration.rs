@@ -74,7 +74,7 @@ async fn test_full_plan_driven_ritual_turn_with_gemini_3() {
 
     // 3. Run the thread runtime through the public ritual path.
     let result =
-        thread::execute_thread_file(&path, base_path, &config, None, Some("0".to_string()), None)
+        thread::execute_thread_file(&path, base_path, std::sync::Arc::new(config), None, Some("0".to_string()), None)
             .await;
 
     match result {
@@ -160,7 +160,7 @@ async fn test_privileged_request_with_exec_disabled_settles_without_completing_r
     println!("🚀 Starting privileged-mode clarification live test...");
 
     let result =
-        thread::execute_thread_file(&path, base_path, &config, None, Some("0".to_string()), None)
+        thread::execute_thread_file(&path, base_path, std::sync::Arc::new(config), None, Some("0".to_string()), None)
             .await;
 
     match result {

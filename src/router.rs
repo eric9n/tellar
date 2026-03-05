@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 static FENCED_JSON_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?s)```(?:json)?\s*(\{.*\})\s*```").expect("valid fenced json regex")
@@ -64,11 +65,10 @@ fn extract_json_object(raw: &str) -> Result<String> {
         return Ok(trimmed.to_string());
     }
 
-    if let Some(caps) = FENCED_JSON_RE.captures(trimmed) {
-        if let Some(body) = caps.get(1) {
+    if let Some(caps) = FENCED_JSON_RE.captures(trimmed)
+        && let Some(body) = caps.get(1) {
             return Ok(body.as_str().trim().to_string());
         }
-    }
 
     bail!("model output did not contain a JSON object")
 }
@@ -302,7 +302,7 @@ Output schema:\n\
 }
 
 async fn request_route_narrative(
-    config: &Config,
+    config: Arc<Config>,
     routing_prompt: &str,
     user_prompt: String,
 ) -> Result<String> {
@@ -327,16 +327,16 @@ async fn request_route_narrative(
 
 pub(crate) async fn plan_conversational_request(
     base_path: &Path,
-    config: &Config,
+    config: Arc<Config>,
     workset: &Workset,
 ) -> Result<RequestRoute> {
     let text = workset.text();
-    let catalog = collect_routing_tool_catalog(base_path, config, &text);
+    let catalog = collect_routing_tool_catalog(base_path, &config, &text);
     let allowed_tools = &catalog.allowed_tools;
 
     let routing_prompt = build_routing_prompt(&catalog.rendered_specs);
     let user_prompt = format!("Route this request:\n{}", text);
-    let narrative = request_route_narrative(config, &routing_prompt, user_prompt).await?;
+    let narrative = request_route_narrative(Arc::clone(&config), &routing_prompt, user_prompt).await?;
 
     parse_route_decision(&narrative, allowed_tools)
 }

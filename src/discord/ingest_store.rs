@@ -21,13 +21,12 @@ pub fn append_to_message_log(
     let file_path = resolve_thread_log_path(workspace_path, thread_id)
         .ok_or_else(|| anyhow::anyhow!("Invalid thread target: {}", thread_id))?;
 
-    if !file_path.exists() {
-        if let Some(parent) = file_path.parent() {
+    if !file_path.exists()
+        && let Some(parent) = file_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-    }
 
-    let mut content = fs::read_to_string(&file_path).unwrap_or_default();
+    let mut content = std::fs::read_to_string(&file_path).unwrap_or_default();
 
     let mut entry = format!(
         "\n---\n**Author**: {} (ID: {}) | **Time**: {} | **Message ID**: {}\n",
@@ -61,13 +60,13 @@ pub fn append_to_message_log(
             })
             .collect();
         entry.push_str(&links.join(", "));
-        entry.push_str("\n");
+        entry.push('\n');
     }
 
     entry.push_str(&format!("\n{}\n", content_text));
 
     content.push_str(&entry);
-    fs::write(&file_path, content)?;
+    std::fs::write(&file_path, content)?;
     Ok(())
 }
 
@@ -95,7 +94,7 @@ pub async fn download_attachment(
     let client = reqwest::Client::new();
     let response = client.get(&attachment.url).send().await?;
     let bytes = response.bytes().await?;
-    fs::write(&target_path, bytes)?;
+    std::fs::write(&target_path, bytes)?;
 
     Ok(target_path)
 }

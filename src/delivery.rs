@@ -252,7 +252,7 @@ fn build_outbox_file(
         .unwrap_or(0);
     let sanitized = sanitize_filename(filename);
     let final_path = outbox.join(format!("{}_{}", timestamp, sanitized));
-    fs::write(&final_path, content)
+    std::fs::write(&final_path, content)
         .map_err(|e| ToolExecutionResult::error(format!("Error writing outbox file: {}", e)))?;
     Ok(final_path)
 }
@@ -535,7 +535,7 @@ mod tests {
     fn test_build_outbox_file_writes_content() {
         let dir = tempdir().unwrap();
         let file = build_outbox_file(dir.path(), "notes.txt", "hello").unwrap();
-        let written = fs::read_to_string(file).unwrap();
+        let written = std::fs::read_to_string(file).unwrap();
         assert_eq!(written, "hello");
     }
 
@@ -574,7 +574,7 @@ mod tests {
     fn test_resolve_attachment_path_accepts_guild_prefix() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("docs")).unwrap();
-        fs::write(dir.path().join("docs").join("note.txt"), "hello").unwrap();
+        std::fs::write(dir.path().join("docs").join("note.txt"), "hello").unwrap();
 
         let resolved =
             resolve_attachment_path("guild/docs/note.txt", dir.path(), &test_config()).unwrap();
@@ -629,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_attachments_prevalidates_all_paths_before_sending() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("ok.txt"), "hello").unwrap();
+        std::fs::write(dir.path().join("ok.txt"), "hello").unwrap();
 
         let result = dispatch_delivery_tool(
             "send_attachments",
